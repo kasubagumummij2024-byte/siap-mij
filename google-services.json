@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1088201329042",
+    "project_id": "secur-mij",
+    "storage_bucket": "secur-mij.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1088201329042:android:f29456116cb3c5df66194b",
+        "android_client_info": {
+          "package_name": "com.kasubagumum.siap_mij_mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCVvEZAGp3adsj25X9ybEpT9mkRLv8_wd0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
