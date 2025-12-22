@@ -1,16 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Alert, RefreshControl, ActivityIndicator, FlatList, Image, Modal, Animated, Easing, Dimensions, TextInput } from 'react-native';
-import { Ionicons } from '@expo/vector-icons'; 
-import { doc, getDoc, collection, query, where, orderBy, getDocs, limit, updateDoc, onSnapshot, addDoc, serverTimestamp, writeBatch, setDoc } from 'firebase/firestore'; 
-import * as Sharing from 'expo-sharing';       
-import DateTimePicker from '@react-native-community/datetimepicker'; 
-import { Audio } from 'expo-av'; // <--- IMPORT LIBRARY AUDIO
-import { db, auth } from '../firebaseConfig'; 
-import ReportModal from './ReportModal'; 
-import PermissionModal from './PermissionModal'; 
+import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { Audio } from 'expo-av';
+import * as Sharing from 'expo-sharing';
+import { addDoc, collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
+import { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Animated, Dimensions, Easing, FlatList, Image, Modal, RefreshControl, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+
+// --- 1. IMPORT BARU UNTUK SYNC ---
+import NetInfo from '@react-native-community/netinfo';
+import { syncData } from '../utils/syncService'; // Pastikan path foldernya benar
+// ---------------------------------
+
+import { db } from '../firebaseConfig';
 import ApprovalList from './ApprovalList';
-import AttendanceModal from './AttendanceModal'; 
-import ChangePasswordModal from './ChangePasswordModal'; 
+import AttendanceModal from './AttendanceModal';
+import ChangePasswordModal from './ChangePasswordModal';
+import PermissionModal from './PermissionModal';
+import ReportModal from './ReportModal';
 
 // File System Compatibility
 let FileSystem;
@@ -56,36 +62,30 @@ export default function Dashboard({ user, userData, onLogout }) {
   const isCommander = ['commander', 'koordinator'].includes(userData?.jabatan);
 
   const themeColor = userData?.divisi === 'security' ? '#2563eb' : 
-                     userData?.divisi === 'cleaning' ? '#16a34a' : 
-                     userData?.divisi === 'management' ? '#7c3aed' : '#ea580c';
+                      userData?.divisi === 'cleaning' ? '#16a34a' : 
+                      userData?.divisi === 'management' ? '#7c3aed' : '#ea580c';
 
-  // --- LOGIKA SUARA SIRINE (REVISI: ANTI-MACET) ---
+  // --- LOGIKA SUARA SIRINE ---
   useEffect(() => {
-    let isCancelled = false; // Penanda untuk mencegah race condition
+    let isCancelled = false; 
 
     const manageSiren = async () => {
-      // 1. JIKA SOS AKTIF (NYALAKAN)
       if (activeSOS) {
-        // Cek: Jika suara sudah ada/sedang jalan, jangan buat baru (mencegah glitch/double sound)
         if (soundRef.current?._loaded) return;
 
         try {
-          // Setup mode agar bunyi walau di-silent
           await Audio.setAudioModeAsync({
             playsInSilentModeIOS: true,
             staysActiveInBackground: true,
             shouldDuckAndroid: true,
           });
 
-          // Mulai load file
           const { sound } = await Audio.Sound.createAsync(
              require('../assets/siren.mp3'),
              { shouldPlay: true, isLooping: true, volume: 1.0 }
           );
 
-          // PENTING: Cek apakah saat loading selesai, user keburu mematikan SOS?
           if (isCancelled || !activeSOS) {
-             console.log("SOS dibatalkan saat loading, unload suara.");
              await sound.unloadAsync();
              return;
           }
@@ -95,17 +95,15 @@ export default function Dashboard({ user, userData, onLogout }) {
            console.log("Gagal memuat sirine:", error);
         }
       } 
-      // 2. JIKA SOS MATI (HENTIKAN)
       else {
         if (soundRef.current) {
           try {
-            console.log("Mematikan Sirine...");
             await soundRef.current.stopAsync();
             await soundRef.current.unloadAsync();
           } catch (e) {
             console.log("Error saat stop:", e);
           } finally {
-            soundRef.current = null; // Pastikan ref kosong
+            soundRef.current = null; 
           }
         }
       }
@@ -113,89 +111,68 @@ export default function Dashboard({ user, userData, onLogout }) {
 
     manageSiren();
 
-    // Cleanup saat component unmount atau activeSOS berubah
     return () => {
       isCancelled = true;
-      // Kita tidak unload di sini secara paksa agar suara tidak putus-nyambung (glitch)
-      // saat ada update data Firestore. Biarkan logika 'else' di atas yang mengurus stop.
-      // Kecuali jika component benar-benar unmount (User logout/tutup aplikasi).
     };
   }, [activeSOS]);
 
-  // --- ANIMASI RUNNING TEXT (REVISI: AUTO-RESET) ---
+  // --- ANIMASI RUNNING TEXT (REVISI: INFINITE LOOP) ---
   useEffect(() => {
-    // 1. Reset posisi ke kanan layar setiap kali teks berubah
-    translateX.setValue(SCREEN_WIDTH); 
-
-    let currentAnimation = null;
+    let stopAnimation = false; // Flag untuk menghentikan animasi saat layar ditutup
 
     const startAnimation = () => {
-      // Hitung durasi berdasarkan panjang teks agar kecepatan stabil
-      // (Teks panjang = jalan lebih lama, Teks pendek = jalan standar)
-      const duration = (announcement.length * 150) + 8000; 
+      if (stopAnimation) return; // Stop jika komponen sudah tidak aktif
 
-      currentAnimation = Animated.timing(translateX, {
-        toValue: -SCREEN_WIDTH * 2, // Bergerak sampai hilang di kiri
-        duration: duration,
-        easing: Easing.linear,
+      // 1. RESET POSISI: Kembalikan teks ke paling kanan layar
+      translateX.setValue(SCREEN_WIDTH); 
+
+      // 2. HITUNG DURASI: Agar kecepatan stabil (Teks panjang = lebih lambat)
+      const textLength = announcement ? announcement.length : 20;
+      const duration = 5000 + (textLength * 200); // Rumus kecepatan: Dasar 5 detik + per karakter
+
+      // 3. MULAI ANIMASI
+      Animated.timing(translateX, {
+        toValue: -SCREEN_WIDTH * 2, // Bergerak ke kiri sampai hilang
+        duration: duration, 
+        easing: Easing.linear, // Gerakan rata (tidak ada percepatan/perlambatan)
         useNativeDriver: true,
-      });
-
-      currentAnimation.start(({ finished }) => {
-        if (finished) {
-          startAnimation(); // Ulangi loop
+      }).start(({ finished }) => {
+        // 4. JIKA SELESAI & TIDAK DI-STOP: Ulangi lagi
+        if (finished && !stopAnimation) {
+          startAnimation(); 
         }
       });
     };
 
+    // Jalankan pertama kali
     startAnimation();
 
-    // Cleanup: Hentikan animasi lama jika teks berubah
+    // Cleanup: Matikan animasi jika user pindah halaman/logout
     return () => {
-      if (currentAnimation) currentAnimation.stop();
+      stopAnimation = true;
     };
-  }, [announcement]); // <--- Penting: Efek ini jalan ulang saat 'announcement' berubah
+  }, [announcement]); // Animasi reset ulang jika isi pengumuman berubah 
 
-  // --- LISTENER PENGUMUMAN (DEBUG MODE) ---
+  // --- LISTENER PENGUMUMAN ---
   useEffect(() => {
-    console.log("🔥 START: Menghubungkan ke app_config/announcement...");
     const docRef = doc(db, "app_config", "announcement");
-    
     const unsubscribe = onSnapshot(docRef, 
       (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
-          console.log("✅ DATA DITERIMA:", data.text); // Cek log ini di terminal
           if(data.text) {
             setAnnouncement(data.text);
           }
         } else {
-          console.log("⚠️ DOKUMEN TIDAK DITEMUKAN! Pastikan ID dokumen di database adalah 'announcement' (huruf kecil semua).");
-          // Fallback agar tidak kosong melompong
           setAnnouncement("Selamat Datang (Mode Offline/Default)");
         }
       }, 
       (error) => {
-        // Ini akan menangkap jika masalahnya adalah Rules/Permission
-        console.error("❌ ERROR PERMISSION/KONEKSI:", error.message);
-        Alert.alert("Gagal Memuat Pengumuman", error.message);
+        console.error("ERROR PERMISSION/KONEKSI:", error.message);
       }
     );
     return () => unsubscribe();
   }, []);
-
-  // --- UPDATE PENGUMUMAN (KASUBAG) ---
-  const handleUpdateAnnouncement = async () => {
-    try {
-      await setDoc(doc(db, "app_config", "announcement"), {
-        text: tempAnnounce,
-        updatedBy: user.uid,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-      setEditAnnounceVisible(false);
-      Alert.alert("Sukses", "Pengumuman diperbarui.");
-    } catch (e) { Alert.alert("Gagal", e.message); }
-  };
 
   // --- REALTIME SOS LISTENER ---
   useEffect(() => {
@@ -231,21 +208,15 @@ export default function Dashboard({ user, userData, onLogout }) {
     return () => clearInterval(interval);
   }, [userStatus, userData]);
 
-  // --- REVISI FINAL: SESUAI STRUKTUR DATABASE (FIXED) ---
+  // --- FETCH DATA UTAMA ---
   const checkDailyAttendance = async () => {
     try {
-      // 1. Ambil tanggal hari ini format YYYY-MM-DD (Sesuai database "2025-12-18")
       const now = new Date();
       const year = now.getFullYear();
       const month = String(now.getMonth() + 1).padStart(2, '0');
       const day = String(now.getDate()).padStart(2, '0');
       const todayString = `${year}-${month}-${day}`; 
 
-      console.log(`🔍 Mencek database attendance untuk: UserID=${user.uid}, Date=${todayString}`);
-
-      // 2. Query Database
-      // HAPUS where("type", "==", "check-in") karena field type tidak ada!
-      // Cukup cari dokumen milik user ini di tanggal ini.
       const q = query(
         collection(db, "attendance"),
         where("userId", "==", user.uid),
@@ -253,19 +224,7 @@ export default function Dashboard({ user, userData, onLogout }) {
       );
       
       const snap = await getDocs(q);
-      
-      // 3. Cek Hasil
-      // Jika ada dokumennya, berarti sudah absen.
-      const isPresent = !snap.empty;
-
-      if (isPresent) {
-         const data = snap.docs[0].data();
-         console.log(`✅ Absen Ditemukan! Status: ${data.status}`);
-      } else {
-         console.log("❌ Belum ada data absen hari ini.");
-      }
-
-      setHasCheckedIn(isPresent);
+      setHasCheckedIn(!snap.empty);
 
     } catch (e) { 
       console.log("Error checking attendance", e); 
@@ -273,7 +232,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     }
   };
 
-  // --- FETCH DATA UTAMA ---
   const fetchData = async () => {
     setRefreshing(true);
     setLoadingReports(true); 
@@ -315,7 +273,47 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   useEffect(() => { fetchData(); }, []);
 
-  // --- LOGIC RESET POIN (KASUBAG) ---
+  // --- 2. LOGIC BARU: AUTO SYNC LISTENER ---
+  useEffect(() => {
+    // Listener ini akan aktif setiap kali status jaringan berubah
+    const unsubscribe = NetInfo.addEventListener(state => {
+      // Jika Internet CONNECTED & REACHABLE
+      if (state.isConnected && state.isInternetReachable) {
+        
+        // Panggil fungsi syncService
+        syncData().then((count) => {
+          if (count > 0) {
+            // Jika ada data yang berhasil diupload
+            Alert.alert(
+              "Sinkronisasi Berhasil", 
+              `${count} laporan offline Anda telah terkirim ke server.`
+            );
+            // Refresh halaman agar laporan baru muncul di list & poin update
+            fetchData(); 
+          }
+        });
+
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
+  // ------------------------------------------
+
+
+  // --- FUNGSI-FUNGSI TOMBOL ---
+  const handleUpdateAnnouncement = async () => {
+    try {
+      await setDoc(doc(db, "app_config", "announcement"), {
+        text: tempAnnounce,
+        updatedBy: user.uid,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setEditAnnounceVisible(false);
+      Alert.alert("Sukses", "Pengumuman diperbarui.");
+    } catch (e) { Alert.alert("Gagal", e.message); }
+  };
+
   const handleResetPoints = async () => {
     Alert.alert(
       "⚠️ PERINGATAN KERAS",
@@ -345,7 +343,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     );
   };
 
-  // --- SOS LOGIC ---
   const handleTriggerSOS = () => {
     if (activeSOS) {
       Alert.alert("SOS Sedang Aktif", `Sinyal SOS sedang menyala oleh ${activeSOS.userName}`);
@@ -471,7 +468,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     return (
       <View style={styles.sosBanner}>
         <View style={styles.sosHeader}>
-          {/* Tambahkan animasi berkedip jika mau, untuk sekarang ikon statis */}
           <Ionicons name="warning" size={32} color="white" /><Text style={styles.sosTitle}>SINYAL BAHAYA AKTIF</Text><Ionicons name="warning" size={32} color="white" />
         </View>
         <Text style={styles.sosText}>Pelapor: {activeSOS.userName}</Text>
@@ -487,19 +483,17 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   return (
     <View style={styles.container}>
-      {/* --- REVISI: PRE-FILL DATA SAAT KLIK --- */}
       <TouchableOpacity 
         style={styles.marqueeContainer} 
         onPress={() => {
           if (isKasubag) {
-            setTempAnnounce(announcement); // <--- INI KUNCINYA: Isi dulu variabel edit dengan teks sekarang
+            setTempAnnounce(announcement); 
             setEditAnnounceVisible(true);
           }
         }}
         activeOpacity={isKasubag ? 0.7 : 1}
       >
          <Animated.View style={{ transform: [{ translateX }], width: '1000%' }}>
-            {/* KEY adalah rahasianya: Memaksa render ulang saat isi berubah */}
             <Text key={announcement} style={styles.marqueeText}>
               📢 {announcement}
             </Text>
@@ -589,7 +583,6 @@ export default function Dashboard({ user, userData, onLogout }) {
 
       <ChangePasswordModal visible={passModalVisible} onClose={() => setPassModalVisible(false)} user={user} />
       
-      {/* --- REVISI: MODAL INPUT LEBIH STABIL --- */}
       <Modal visible={editAnnounceVisible} transparent={true} animationType="fade" onRequestClose={() => setEditAnnounceVisible(false)}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
@@ -598,13 +591,12 @@ export default function Dashboard({ user, userData, onLogout }) {
                style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color: 'black'}}
                multiline
                placeholder="Tulis pengumuman di sini..."
-               value={tempAnnounce} // <--- GANTI defaultValue JADI value
+               value={tempAnnounce} 
                onChangeText={setTempAnnounce}
              />
              <View style={styles.modalFooter}>
                <TouchableOpacity onPress={() => setEditAnnounceVisible(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity>
                <TouchableOpacity onPress={() => {
-                   console.log("Mengirim Update:", tempAnnounce); // Cek log ini di terminal
                    handleUpdateAnnouncement();
                }} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity>
              </View>

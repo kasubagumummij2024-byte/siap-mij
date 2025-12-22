@@ -1,10 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, Modal, TouchableOpacity, TextInput, Image, Alert, ActivityIndicator, ScrollView, FlatList } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { collection, getDocs, addDoc, updateDoc, doc, increment, serverTimestamp, getDoc } from 'firebase/firestore'; // <-- Tambah getDoc
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { addDoc, collection, doc, getDoc, getDocs, increment, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { db, storage } from '../firebaseConfig';
+
+// --- TAMBAHAN BARU: Import NetInfo & Utils ---
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
+import { simpanLaporanOffline } from '../utils/offlineStorage'; // Pastikan path foldernya benar
 
 export default function ReportModal({ visible, onClose, user, userData, onSuccess }) {
   const [image, setImage] = useState(null);
@@ -14,24 +19,43 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
   const [showLocSelector, setShowLocSelector] = useState(false);
   const [uploading, setUploading] = useState(false);
 
-  // Ambil Data Lokasi
+  // --- REVISI: Ambil Data Lokasi (Dengan Cache Offline) ---
   useEffect(() => {
     const fetchLocations = async () => {
-      try {
-        const querySnapshot = await getDocs(collection(db, "locations"));
-        const locs = [];
-        querySnapshot.forEach((doc) => {
-          locs.push(doc.data());
-        });
-        setLocationList(locs);
-      } catch (e) {
-        console.error("Gagal ambil lokasi:", e);
+      // 1. Cek Koneksi
+      const state = await NetInfo.fetch();
+      
+      if (state.isConnected) {
+        // ONLINE: Ambil dari Firebase & Update Cache
+        try {
+          const querySnapshot = await getDocs(collection(db, "locations"));
+          const locs = [];
+          querySnapshot.forEach((doc) => {
+            locs.push(doc.data());
+          });
+          setLocationList(locs);
+          // Simpan ke cache HP untuk jaga-jaga kalau nanti offline
+          await AsyncStorage.setItem('@cache_locations', JSON.stringify(locs));
+        } catch (e) {
+          console.error("Gagal ambil lokasi online:", e);
+        }
+      } else {
+        // OFFLINE: Ambil dari Cache HP
+        try {
+          const cachedLocs = await AsyncStorage.getItem('@cache_locations');
+          if (cachedLocs) {
+            setLocationList(JSON.parse(cachedLocs));
+          }
+        } catch (e) {
+          console.error("Gagal ambil cache lokasi:", e);
+        }
       }
     };
+
     if (visible) fetchLocations();
   }, [visible]);
 
-  // Fungsi Kamera
+  // Fungsi Kamera (Tetap sama)
   const pickImage = async () => {
     try {
       const permission = await ImagePicker.requestCameraPermissionsAsync();
@@ -51,70 +75,58 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
     }
   };
 
-  // --- LOGIKA VALIDASI SHIFT (Security) ---
+  // --- LOGIKA VALIDASI SHIFT ---
   const checkShiftValidity = async () => {
-    // 1. Jika bukan Security, langsung lolos
-    if (userData?.divisi !== 'security') return true;
+    // Jika offline, kita SKIP validasi shift (Trust System) agar user tetap bisa lapor
+    const state = await NetInfo.fetch();
+    if (!state.isConnected) return true; 
 
+    if (userData?.divisi !== 'security') return true;
     const now = new Date();
-    const hour = now.getHours(); // Jam saat ini (0 - 23)
+    const hour = now.getHours(); 
     const todayStr = now.toISOString().split('T')[0];
 
     try {
-      // 2. Cek Absensi HARI INI
       const todayRef = doc(db, "attendance", `${todayStr}_${user.uid}`);
       const todaySnap = await getDoc(todayRef);
-      
       let currentShift = todaySnap.exists() ? todaySnap.data().shift : null;
 
-      // 3. SPECIAL CASE: JAM DINI HARI (00:00 - 07:00)
-      // Jika sekarang jam 2 pagi, member mungkin belum absen hari ini,
-      // tapi dia masih bertugas dari Shift Malam KEMARIN.
       if (!currentShift && hour >= 0 && hour <= 7) {
         const yesterday = new Date(now);
         yesterday.setDate(yesterday.getDate() - 1);
         const yStr = yesterday.toISOString().split('T')[0];
-        
         const yRef = doc(db, "attendance", `${yStr}_${user.uid}`);
         const ySnap = await getDoc(yRef);
-        
         if (ySnap.exists() && ySnap.data().shift === 'Malam') {
-          currentShift = 'Malam'; // Anggap dia masih shift malam
+          currentShift = 'Malam';
         }
       }
 
-      // 4. Jika belum absen sama sekali
       if (!currentShift) {
         Alert.alert("Akses Ditolak", "Anda belum melakukan Absensi (Check-In) hari ini.");
         return false;
       }
 
-      // 5. Validasi Jam vs Shift
       if (currentShift === 'Pagi') {
-        // ATURAN PAGI: 05.00 - 19.00
         if (hour < 5 || hour >= 19) {
           Alert.alert("Diluar Jam Tugas", "Shift PAGI hanya bisa melapor antara jam 05:00 - 19:00.");
           return false;
         }
       } else if (currentShift === 'Malam') {
-        // ATURAN MALAM: 17.00 - 07.00 (Besoknya)
-        // Valid jika: Jam >= 17 (Sore/Malam ini) ATAU Jam <= 7 (Pagi buta besoknya)
         if (hour < 17 && hour > 7) {
           Alert.alert("Diluar Jam Tugas", "Shift MALAM hanya bisa melapor antara jam 17:00 - 07:00.");
           return false;
         }
       }
-
-      return true; // Lolos semua cek
+      return true; 
 
     } catch (error) {
       console.error("Error cek shift:", error);
-      // Jika error internet/database, kita izinkan saja (fail-safe) atau blokir tergantung kebijakan
-      return true; 
+      return true; // Fail-safe: jika error database, izinkan saja
     }
   };
 
-  // Fungsi Kirim
+  // --- REVISI UTAMA: FUNGSI KIRIM (OFFLINE + ONLINE) ---
   const handleSubmit = async () => {
     // A. Validasi Input Dasar
     if (!image) { Alert.alert("Foto Wajib", "Harap ambil foto bukti."); return; }
@@ -123,59 +135,112 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
 
     setUploading(true);
 
-    // B. Validasi Shift Security (BARU)
+    // B. Cek Koneksi Internet
+    const state = await NetInfo.fetch();
+
+    // C. Validasi Shift
     const isShiftValid = await checkShiftValidity();
     if (!isShiftValid) {
       setUploading(false);
-      return; // Stop jika jam tidak sesuai shift
+      return; 
     }
 
+    // --- LOGIC PERCABANGAN (FORKING) ---
+    if (state.isConnected) {
+      // === JIKA ONLINE (Cara Lama) ===
+      try {
+        const blob = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.onload = function () { resolve(xhr.response); };
+          xhr.onerror = function (e) { reject(new TypeError("Network request failed")); };
+          xhr.responseType = "blob";
+          xhr.open("GET", image, true);
+          xhr.send(null);
+        });
+
+        const filename = `laporan/${user.uid}_${Date.now()}.jpg`;
+        const storageRef = ref(storage, filename);
+        await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
+        blob.close();
+        const downloadURL = await getDownloadURL(storageRef);
+
+        await addDoc(collection(db, "reports"), {
+          userId: user.uid,
+          userName: userData?.nama || user.displayName || "Anggota",
+          userDivisi: userData?.divisi || "umum",
+          locationId: selectedLocation.id,
+          locationName: selectedLocation.nama,
+          description: desc,
+          photoUrl: downloadURL,
+          timestamp: serverTimestamp(),
+          date: new Date().toISOString().split('T')[0]
+        });
+
+        const userRef = doc(db, "users", user.uid);
+        await updateDoc(userRef, { total_poin: increment(10) });
+
+        Alert.alert("Sukses!", "Laporan Terkirim ke Server. +10 Poin!");
+        resetForm();
+        onSuccess();
+        
+      } catch (error) {
+        console.error("Gagal Upload Online:", error);
+        // Jika gagal upload (misal server timeout), tawarkan simpan offline
+        Alert.alert(
+          "Gagal Terkirim", 
+          "Koneksi tidak stabil. Simpan ke draft offline?",
+          [
+            { text: "Batal", style: "cancel" },
+            { text: "Simpan Offline", onPress: () => processOfflineSave() }
+          ]
+        );
+      } finally {
+        setUploading(false);
+      }
+
+    } else {
+      // === JIKA OFFLINE (Cara Baru) ===
+      await processOfflineSave();
+      setUploading(false);
+    }
+  };
+
+  // Fungsi Helper untuk Simpan Offline
+  const processOfflineSave = async () => {
     try {
-      // C. Upload Foto
-      const blob = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.onload = function () { resolve(xhr.response); };
-        xhr.onerror = function (e) { reject(new TypeError("Network request failed")); };
-        xhr.responseType = "blob";
-        xhr.open("GET", image, true);
-        xhr.send(null);
-      });
-
-      const filename = `laporan/${user.uid}_${Date.now()}.jpg`;
-      const storageRef = ref(storage, filename);
-      await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
-      blob.close();
-      const downloadURL = await getDownloadURL(storageRef);
-
-      // D. Simpan Database
-      await addDoc(collection(db, "reports"), {
+      // Kita simpan path gambar LOKAL (bukan URL firebase)
+      const dataOffline = {
+        type: 'REPORT', // Penanda tipe data
         userId: user.uid,
-        userName: userData?.nama || user.displayName || "Anggota",
+        userName: userData?.nama || "Anggota",
         userDivisi: userData?.divisi || "umum",
         locationId: selectedLocation.id,
         locationName: selectedLocation.nama,
         description: desc,
-        photoUrl: downloadURL,
-        timestamp: serverTimestamp(),
-        date: new Date().toISOString().split('T')[0]
-      });
+        localImageUri: image, // PENTING: Simpan path lokal HP
+        timestamp: Date.now(), // Pakai timestamp biasa, bukan serverTimestamp
+        status: 'pending'
+      };
 
-      // E. Update Poin
-      const userRef = doc(db, "users", user.uid);
-      await updateDoc(userRef, { total_poin: increment(10) });
-
-      Alert.alert("Sukses!", "Laporan Terkirim. +10 Poin!");
-      setImage(null);
-      setDesc('');
-      setSelectedLocation(null);
-      onSuccess();
+      await simpanLaporanOffline(dataOffline);
       
-    } catch (error) {
-      console.error(error);
-      Alert.alert("Gagal", "Terjadi kesalahan sistem.");
-    } finally {
-      setUploading(false);
+      Alert.alert(
+        "Disimpan Offline", 
+        "Sinyal tidak ada. Laporan disimpan di HP dan akan dikirim otomatis saat sinyal bagus."
+      );
+      resetForm();
+      onSuccess(); // Tutup modal
+
+    } catch (e) {
+      Alert.alert("Error", "Gagal menyimpan data offline.");
+      console.error(e);
     }
+  };
+
+  const resetForm = () => {
+    setImage(null);
+    setDesc('');
+    setSelectedLocation(null);
   };
 
   const renderLocationPopup = () => (
@@ -183,17 +248,23 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
       <View style={styles.popupOverlay}>
         <View style={styles.popupContainer}>
           <Text style={styles.popupTitle}>Pilih Lokasi</Text>
-          <FlatList 
-            data={locationList}
-            keyExtractor={(item) => item.id}
-            style={{ maxHeight: 400 }} 
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.popupItem} onPress={() => { setSelectedLocation(item); setShowLocSelector(false); }}>
-                <Ionicons name="location" size={20} color="#2563eb" style={{marginRight:10}} />
-                <Text style={styles.popupItemText}>{item.nama}</Text>
-              </TouchableOpacity>
-            )}
-          />
+          {locationList.length === 0 ? (
+            <Text style={{textAlign:'center', color:'#94a3b8', margin: 20}}>
+              Data lokasi tidak ditemukan. Pastikan pernah online sebelumnya.
+            </Text>
+          ) : (
+            <FlatList 
+              data={locationList}
+              keyExtractor={(item) => item.id}
+              style={{ maxHeight: 400 }} 
+              renderItem={({ item }) => (
+                <TouchableOpacity style={styles.popupItem} onPress={() => { setSelectedLocation(item); setShowLocSelector(false); }}>
+                  <Ionicons name="location" size={20} color="#2563eb" style={{marginRight:10}} />
+                  <Text style={styles.popupItemText}>{item.nama}</Text>
+                </TouchableOpacity>
+              )}
+            />
+          )}
           <TouchableOpacity style={styles.closePopupBtn} onPress={() => setShowLocSelector(false)}>
             <Text style={{color:'#ef4444', fontWeight:'bold'}}>BATAL</Text>
           </TouchableOpacity>
