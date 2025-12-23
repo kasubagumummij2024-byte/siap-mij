@@ -6,10 +6,9 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { db, storage } from '../firebaseConfig';
 
-// --- TAMBAHAN BARU: Import NetInfo & Utils ---
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
-import { simpanLaporanOffline } from '../utils/offlineStorage'; // Pastikan path foldernya benar
+import { simpanLaporanOffline } from '../utils/offlineStorage';
 
 export default function ReportModal({ visible, onClose, user, userData, onSuccess }) {
   const [image, setImage] = useState(null);
@@ -19,14 +18,10 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
   const [showLocSelector, setShowLocSelector] = useState(false);
   const [uploading, setUploading] = useState(false);
 
-  // --- REVISI: Ambil Data Lokasi (Dengan Cache Offline) ---
   useEffect(() => {
     const fetchLocations = async () => {
-      // 1. Cek Koneksi
       const state = await NetInfo.fetch();
-      
       if (state.isConnected) {
-        // ONLINE: Ambil dari Firebase & Update Cache
         try {
           const querySnapshot = await getDocs(collection(db, "locations"));
           const locs = [];
@@ -34,13 +29,11 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
             locs.push(doc.data());
           });
           setLocationList(locs);
-          // Simpan ke cache HP untuk jaga-jaga kalau nanti offline
           await AsyncStorage.setItem('@cache_locations', JSON.stringify(locs));
         } catch (e) {
           console.error("Gagal ambil lokasi online:", e);
         }
       } else {
-        // OFFLINE: Ambil dari Cache HP
         try {
           const cachedLocs = await AsyncStorage.getItem('@cache_locations');
           if (cachedLocs) {
@@ -51,11 +44,9 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
         }
       }
     };
-
     if (visible) fetchLocations();
   }, [visible]);
 
-  // Fungsi Kamera (Tetap sama)
   const pickImage = async () => {
     try {
       const permission = await ImagePicker.requestCameraPermissionsAsync();
@@ -75,30 +66,47 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
     }
   };
 
-  // --- LOGIKA VALIDASI SHIFT ---
+  // --- REVISI: LOGIKA VALIDASI SHIFT (FIXED JAM 22.00 & CASE SENSITIVE) ---
   const checkShiftValidity = async () => {
-    // Jika offline, kita SKIP validasi shift (Trust System) agar user tetap bisa lapor
+    // 1. Cek Koneksi (Jika offline, skip validasi)
     const state = await NetInfo.fetch();
     if (!state.isConnected) return true; 
 
-    if (userData?.divisi !== 'security') return true;
+    // 2. Cek Divisi (Pakai toLowerCase agar aman)
+    const userDivisi = userData?.divisi ? userData.divisi.toLowerCase() : "";
+    if (userDivisi !== 'security') return true;
+
     const now = new Date();
     const hour = now.getHours(); 
-    const todayStr = now.toISOString().split('T')[0];
+    
+    // Gunakan tanggal lokal agar sinkron dengan AttendanceModal
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const todayStr = `${year}-${month}-${day}`;
 
     try {
       const todayRef = doc(db, "attendance", `${todayStr}_${user.uid}`);
       const todaySnap = await getDoc(todayRef);
       let currentShift = todaySnap.exists() ? todaySnap.data().shift : null;
 
+      // Cek sisa shift malam kemarin
       if (!currentShift && hour >= 0 && hour <= 7) {
         const yesterday = new Date(now);
         yesterday.setDate(yesterday.getDate() - 1);
-        const yStr = yesterday.toISOString().split('T')[0];
+        
+        const yYear = yesterday.getFullYear();
+        const yMonth = String(yesterday.getMonth() + 1).padStart(2, '0');
+        const yDay = String(yesterday.getDate()).padStart(2, '0');
+        const yStr = `${yYear}-${yMonth}-${yDay}`;
+
         const yRef = doc(db, "attendance", `${yStr}_${user.uid}`);
         const ySnap = await getDoc(yRef);
-        if (ySnap.exists() && ySnap.data().shift === 'Malam') {
-          currentShift = 'Malam';
+        
+        if (ySnap.exists() && ySnap.data().shift) {
+            if (ySnap.data().shift.toLowerCase() === 'malam') {
+                currentShift = 'Malam';
+            }
         }
       }
 
@@ -107,14 +115,17 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
         return false;
       }
 
-      if (currentShift === 'Pagi') {
+      // 3. LOGIC UTAMA: Case Insensitive & Strict Time
+      const shiftClean = currentShift.toLowerCase().trim();
+
+      if (shiftClean === 'pagi') {
         if (hour < 5 || hour >= 19) {
-          Alert.alert("Diluar Jam Tugas", "Shift PAGI hanya bisa melapor antara jam 05:00 - 19:00.");
+          Alert.alert("Diluar Jam Tugas", `Shift PAGI hanya bisa melapor jam 05:00 - 19:00.\nSekarang jam ${hour}:00.`);
           return false;
         }
-      } else if (currentShift === 'Malam') {
-        if (hour < 17 && hour > 7) {
-          Alert.alert("Diluar Jam Tugas", "Shift MALAM hanya bisa melapor antara jam 17:00 - 07:00.");
+      } else if (shiftClean === 'malam') {
+        if (hour > 7 && hour < 17) {
+          Alert.alert("Diluar Jam Tugas", `Shift MALAM hanya bisa melapor jam 17:00 - 07:00.\nSekarang jam ${hour}:00.`);
           return false;
         }
       }
@@ -122,32 +133,26 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
 
     } catch (error) {
       console.error("Error cek shift:", error);
-      return true; // Fail-safe: jika error database, izinkan saja
+      return true; // Fail-safe
     }
   };
 
-  // --- REVISI UTAMA: FUNGSI KIRIM (OFFLINE + ONLINE) ---
   const handleSubmit = async () => {
-    // A. Validasi Input Dasar
     if (!image) { Alert.alert("Foto Wajib", "Harap ambil foto bukti."); return; }
     if (!selectedLocation) { Alert.alert("Lokasi Wajib", "Harap pilih lokasi."); return; }
     if (!desc) { Alert.alert("Keterangan Wajib", "Ceritakan aktivitas Anda."); return; }
 
     setUploading(true);
 
-    // B. Cek Koneksi Internet
     const state = await NetInfo.fetch();
 
-    // C. Validasi Shift
     const isShiftValid = await checkShiftValidity();
     if (!isShiftValid) {
       setUploading(false);
       return; 
     }
 
-    // --- LOGIC PERCABANGAN (FORKING) ---
     if (state.isConnected) {
-      // === JIKA ONLINE (Cara Lama) ===
       try {
         const blob = await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
@@ -173,7 +178,7 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
           description: desc,
           photoUrl: downloadURL,
           timestamp: serverTimestamp(),
-          date: new Date().toISOString().split('T')[0]
+          date: new Date().toISOString().split('T')[0] // Untuk reporting ini OK pakai ISO, atau mau disamakan lokal juga boleh
         });
 
         const userRef = doc(db, "users", user.uid);
@@ -185,7 +190,6 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
         
       } catch (error) {
         console.error("Gagal Upload Online:", error);
-        // Jika gagal upload (misal server timeout), tawarkan simpan offline
         Alert.alert(
           "Gagal Terkirim", 
           "Koneksi tidak stabil. Simpan ke draft offline?",
@@ -199,26 +203,23 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
       }
 
     } else {
-      // === JIKA OFFLINE (Cara Baru) ===
       await processOfflineSave();
       setUploading(false);
     }
   };
 
-  // Fungsi Helper untuk Simpan Offline
   const processOfflineSave = async () => {
     try {
-      // Kita simpan path gambar LOKAL (bukan URL firebase)
       const dataOffline = {
-        type: 'REPORT', // Penanda tipe data
+        type: 'REPORT', 
         userId: user.uid,
         userName: userData?.nama || "Anggota",
         userDivisi: userData?.divisi || "umum",
         locationId: selectedLocation.id,
         locationName: selectedLocation.nama,
         description: desc,
-        localImageUri: image, // PENTING: Simpan path lokal HP
-        timestamp: Date.now(), // Pakai timestamp biasa, bukan serverTimestamp
+        localImageUri: image, 
+        timestamp: Date.now(), 
         status: 'pending'
       };
 
@@ -229,7 +230,7 @@ export default function ReportModal({ visible, onClose, user, userData, onSucces
         "Sinyal tidak ada. Laporan disimpan di HP dan akan dikirim otomatis saat sinyal bagus."
       );
       resetForm();
-      onSuccess(); // Tutup modal
+      onSuccess(); 
 
     } catch (e) {
       Alert.alert("Error", "Gagal menyimpan data offline.");

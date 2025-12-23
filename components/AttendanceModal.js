@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, Modal, TouchableOpacity, Alert, ActivityIndicator, FlatList, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { collection, query, where, getDocs, setDoc, doc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { db } from '../firebaseConfig';
 
 export default function AttendanceModal({ visible, onClose, user, userData }) {
@@ -17,7 +17,18 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
 
   const isLeader = ['kasubag', 'commander', 'koordinator'].includes(userData?.jabatan);
   const isSecurity = userData?.divisi === 'security';
-  const todayDate = new Date().toISOString().split('T')[0]; 
+
+  // --- REVISI: GENERATE TANGGAL LOKAL (FIX BUG ABSEN JAM 5 PAGI) ---
+  // Jangan pakai new Date().toISOString() !
+  const getLocalTodayDate = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+  const todayDate = getLocalTodayDate(); 
+  // ------------------------------------------------------------------
 
   // --- 1. LOAD DATA AWAL ---
   useEffect(() => {
@@ -61,13 +72,13 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
       usersSnap.forEach(u => {
         const uData = u.data();
         if (u.id !== user.uid) {
-           list.push({
-             id: u.id,
-             nama: uData.nama,
-             divisi: uData.divisi,
-             jabatan: uData.jabatan,
-             attendance: attendanceMap[u.id] || null 
-           });
+            list.push({
+              id: u.id,
+              nama: uData.nama,
+              divisi: uData.divisi,
+              jabatan: uData.jabatan,
+              attendance: attendanceMap[u.id] || null 
+            });
         }
       });
       setTeamList(list);
@@ -85,7 +96,7 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
         userId: user.uid,
         userName: userData.nama,
         userDivisi: userData.divisi,
-        date: todayDate,
+        date: todayDate, // Pastikan ini pakai variabel lokal yg sudah diperbaiki
         status: 'Hadir',
         shift: isSecurity ? selectedShift : 'Non-Shift', 
         timestamp: serverTimestamp(),
@@ -109,7 +120,7 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
         userId: memberId,
         userName: memberName,
         userDivisi: memberDivisi,
-        date: todayDate,
+        date: todayDate, // Pastikan ini pakai variabel lokal yg sudah diperbaiki
         status: newStatus, 
         shift: memberDivisi === 'security' && newStatus === 'Hadir' ? shift : 'Non-Shift',
         timestamp: serverTimestamp(),
@@ -193,8 +204,6 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
          renderItem={({ item }) => (
            <View style={styles.memberCard}>
              
-             {/* 1. BAGIAN KIRI: Nama & Info */}
-             {/* Gunakan flex: 1 agar nama mengambil ruang sisa & wrap text jika panjang */}
              <View style={{ flex: 1, marginRight: 10 }}> 
                <Text style={styles.memberName}>{item.nama}</Text>
                <Text style={styles.memberRole}>{item.divisi.toUpperCase()}</Text>
@@ -205,8 +214,6 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
                )}
              </View>
              
-             {/* 2. BAGIAN KANAN: Tombol Aksi (SCROLLABLE) */}
-             {/* Dibungkus ScrollView horizontal agar tombol bisa digeser jika nama terlalu panjang atau layar sempit */}
              <View style={{ maxWidth: '50%' }}> 
                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{paddingVertical: 5}}>
                  <View style={styles.actionRow}>
