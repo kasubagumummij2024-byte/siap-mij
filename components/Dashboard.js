@@ -2,10 +2,12 @@ import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import NetInfo from '@react-native-community/netinfo';
 import { Audio } from 'expo-av';
+import Constants from 'expo-constants'; // TAMBAHAN: Untuk Cek Versi
 import * as Sharing from 'expo-sharing';
 import { addDoc, collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, Dimensions, Easing, FlatList, Image, Modal, RefreshControl, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, BackHandler, Dimensions, Easing, FlatList, Image, Modal, RefreshControl, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+
 import { db } from '../firebaseConfig';
 import { syncData } from '../utils/syncService';
 import ApprovalList from './ApprovalList';
@@ -37,6 +39,9 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [editAnnounceVisible, setEditAnnounceVisible] = useState(false); 
   const [tempAnnounce, setTempAnnounce] = useState("");
 
+  // STATE BARU: STATUS KADALUARSA (FORCE UPDATE)
+  const [isObsolete, setIsObsolete] = useState(false);
+
   const soundRef = useRef(null);
   const translateX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
   
@@ -51,18 +56,49 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [pickerMode, setPickerMode] = useState('from');
 
   // Identifikasi Role (Untuk UI)
-  const isKasubag = userData?.jabatan?.includes('kasubag'); // Tangkap 'kasubag_umum', 'kasubag_logistik'
+  const isKasubag = userData?.jabatan?.includes('kasubag'); 
   const isKabag = userData?.jabatan === 'kabag_tu';
   const isCommander = userData?.jabatan === 'commander';
   const isKoordinator = userData?.jabatan === 'koordinator';
-  const isManagement = userData?.divisi === 'management' || isKasubag || isKabag; // Grup Pimpinan (Poin 8)
+  const isManagement = userData?.divisi === 'management' || isKasubag || isKabag; 
   const isLeader = isManagement || isCommander || isKoordinator;
 
   const themeColor = userData?.divisi === 'security' ? '#2563eb' : 
                       userData?.divisi === 'cleaning' ? '#16a34a' : 
                       userData?.divisi === 'management' ? '#7c3aed' : '#ea580c';
 
-  // --- LOGIKA SUARA SIRINE (REVISI POIN 9: TIDAK BUNYI DI HP SENDIRI) ---
+  // --- 1. LOGIC FORCE UPDATE (SISTEM PERTAHANAN) ---
+  useEffect(() => {
+    // Dengarkan dokumen 'app_config/settings'
+    const unsubscribe = onSnapshot(doc(db, "app_config", "settings"), (docSnap) => {
+        if (docSnap.exists()) {
+            const minVersion = docSnap.data().minVersion; // Misal: "1.1.3"
+            const currentVersion = Constants.expoConfig?.version || '1.0.0'; // Versi HP User
+            
+            // Jika Versi HP < Versi Minimal di Database, kunci aplikasi
+            if (compareVersion(currentVersion, minVersion) < 0) {
+                setIsObsolete(true); 
+            }
+        }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Helper: Bandingkan Versi
+  const compareVersion = (v1, v2) => {
+    if (!v1 || !v2) return 0;
+    const v1Parts = v1.split('.').map(Number);
+    const v2Parts = v2.split('.').map(Number);
+    for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+        const val1 = v1Parts[i] || 0;
+        const val2 = v2Parts[i] || 0;
+        if (val1 > val2) return 1;
+        if (val1 < val2) return -1;
+    }
+    return 0;
+  };
+
+  // --- 2. LOGIKA SUARA SIRINE (REVISI: TIDAK BUNYI DI HP SENDIRI) ---
   useEffect(() => {
     let isCancelled = false; 
     const manageSiren = async () => {
@@ -155,7 +191,7 @@ export default function Dashboard({ user, userData, onLogout }) {
         const now = new Date();
         const end = userData.statusEndTime.toDate();
         const diff = end - now;
-        if (diff <= 0) setBreakLeft("WAKTU HABIS");
+        if (diff <= 0) setBreakLeft("HABIS");
         else {
           const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
           const seconds = Math.floor((diff % (1000 * 60)) / 1000);
@@ -166,21 +202,12 @@ export default function Dashboard({ user, userData, onLogout }) {
     return () => clearInterval(interval);
   }, [userStatus, userData]);
 
-  // --- FETCH DATA UTAMA (REVISI POIN 8: MANAGEMENT LIHAT SEMUA) ---
+  // --- FETCH DATA UTAMA ---
   const checkDailyAttendance = async () => {
     try {
       const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const todayString = `${year}-${month}-${day}`; 
-
-      const q = query(
-        collection(db, "attendance"),
-        where("userId", "==", user.uid),
-        where("date", "==", todayString)
-      );
-      
+      const todayString = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`; 
+      const q = query(collection(db, "attendance"), where("userId", "==", user.uid), where("date", "==", todayString));
       const snap = await getDocs(q);
       setHasCheckedIn(!snap.empty);
     } catch (e) { setHasCheckedIn(false); }
@@ -208,14 +235,12 @@ export default function Dashboard({ user, userData, onLogout }) {
       
       // LOGIKA MONITORING (POIN 8)
       if (isManagement) {
-        // Management (Kasubag, Kabag) melihat SEMUA laporan
+        // Management melihat SEMUA laporan
         q = query(reportsRef, orderBy("timestamp", "desc"), limit(30));
       } else if (isCommander || isKoordinator) {
-        // Commander/Koord melihat laporan Divisinya saja
         const div = userData?.divisi || "umum";
         q = query(reportsRef, where("userDivisi", "==", div), orderBy("timestamp", "desc"), limit(20));
       } else {
-        // Anggota biasa melihat laporan sendiri
         q = query(reportsRef, where("userId", "==", user.uid), orderBy("timestamp", "desc"), limit(20));
       }
 
@@ -233,7 +258,7 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   useEffect(() => { fetchData(); }, []);
 
-  // --- AUTO SYNC ---
+  // --- AUTO SYNC (TETAP ADA) ---
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener(state => {
       if (state.isConnected && state.isInternetReachable) {
@@ -297,7 +322,6 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   const handleResolveSOS = async () => {
     if (!activeSOS) return;
-    // Poin 9: Siapapun yg punya akses tombol ini bisa mematikan
     const canResolve = activeSOS.userId === user.uid || isManagement;
     if (canResolve) {
       Alert.alert("Matikan Sinyal?", "Pastikan kondisi aman.", [
@@ -346,7 +370,7 @@ export default function Dashboard({ user, userData, onLogout }) {
         attendanceMap[`${d.userId}_${d.date}`] = `${d.status} ${d.shift !== 'Non-Shift' ? '('+d.shift+')' : ''}`.trim();
       });
 
-      let csvContent = "Tanggal;Jam;Nama;Divisi;Status Absensi;Lokasi;Keterangan;Foto\n";
+      let csvContent = "Tanggal;Jam;Nama;Divisi;Absensi;Lokasi;Ket;Foto\n";
       reportsSnap.forEach((doc) => {
         const data = doc.data();
         const d = data.timestamp ? data.timestamp.toDate() : new Date();
@@ -373,7 +397,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     ]);
   };
 
-  const formatTime = (ts) => ts ? ts.toDate().toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : "-";
   const renderReportItem = ({ item }) => (
     <View style={styles.cardReport}>
       <Image source={{ uri: item.photoUrl }} style={styles.cardImage} />
@@ -410,11 +433,44 @@ export default function Dashboard({ user, userData, onLogout }) {
     );
   };
 
+  const formatTime = (ts) => ts ? ts.toDate().toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : "-";
+
+  // --- LAYAR KEMATIAN (BLOCKING SCREEN) ---
+  if (isObsolete) {
+    return (
+        <View style={{flex:1, backgroundColor:'black', justifyContent:'center', alignItems:'center', padding:30}}>
+            <Ionicons name="alert-circle" size={80} color="#ef4444" />
+            <Text style={{color:'white', fontSize:24, fontWeight:'bold', marginTop:20, textAlign:'center'}}>
+                UPDATE DIPERLUKAN
+            </Text>
+            <Text style={{color:'#94a3b8', fontSize:16, textAlign:'center', marginTop:10, marginBottom:30}}>
+                Versi aplikasi ini ({Constants.expoConfig?.version}) sudah usang. Mohon install versi terbaru dari Kasubag/Commander agar bisa absen.
+            </Text>
+            <TouchableOpacity 
+                onPress={() => BackHandler.exitApp()} 
+                style={{backgroundColor:'#ef4444', padding:15, borderRadius:10, width:'100%', alignItems:'center'}}>
+                <Text style={{color:'white', fontWeight:'bold'}}>KELUAR APLIKASI</Text>
+            </TouchableOpacity>
+        </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
-      <TouchableOpacity style={styles.marqueeContainer} onPress={() => { if (isKasubag) { setTempAnnounce(announcement); setEditAnnounceVisible(true); } }}>
+      <TouchableOpacity 
+        style={styles.marqueeContainer} 
+        onPress={() => {
+          if (isKasubag) {
+            setTempAnnounce(announcement); 
+            setEditAnnounceVisible(true);
+          }
+        }}
+        activeOpacity={isKasubag ? 0.7 : 1}
+      >
          <Animated.View style={{ transform: [{ translateX }], width: '1000%' }}>
-            <Text key={announcement} style={styles.marqueeText}>📢 {announcement}</Text>
+            <Text key={announcement} style={styles.marqueeText}>
+              📢 {announcement}
+            </Text>
          </Animated.View>
          {isKasubag && <View style={styles.editBadge}><Ionicons name="pencil" size={12} color="white"/></View>}
       </TouchableOpacity>
@@ -431,17 +487,20 @@ export default function Dashboard({ user, userData, onLogout }) {
               </View>
             </View>
           </View>
+
           <View style={{flexDirection: 'row'}}>
-             <TouchableOpacity onPress={() => setPassModalVisible(true)} style={[styles.logoutBtn, {marginRight: 10, backgroundColor: 'rgba(255,255,255,0.2)'}]}><Ionicons name="key-outline" size={24} color="white" /></TouchableOpacity>
+             <TouchableOpacity onPress={() => setPassModalVisible(true)} style={[styles.logoutBtn, {marginRight: 10, backgroundColor: 'rgba(255,255,255,0.2)'}]}>
+               <Ionicons name="key-outline" size={24} color="white" />
+             </TouchableOpacity>
              <TouchableOpacity onPress={onLogout} style={styles.logoutBtn}><Ionicons name="log-out-outline" size={24} color="white" /></TouchableOpacity>
           </View>
         </View>
+        
         <View style={styles.scoreCard}><View><Text style={styles.scoreLabel}>Poin</Text><Text style={styles.scoreValue}>{currentPoints}</Text></View><Ionicons name="trophy" size={40} color="#f59e0b" /></View>
       </View>
       
       <View style={styles.body}>
         {renderSOSBanner()}
-        {/* REVISI POIN 1-6: ApprovalList sekarang lebih pintar memilah */}
         {isLeader && <ApprovalList commanderData={userData} commanderUid={user.uid} />}
         {userStatus !== 'active' && renderStatusCard()}
 
@@ -473,10 +532,12 @@ export default function Dashboard({ user, userData, onLogout }) {
                   <View style={[styles.iconCircle, { backgroundColor: '#ffedd5' }]}><Ionicons name="download" size={28} color="#ea580c" /></View>
                   <Text style={[styles.btnTitle, {color:'#ea580c'}]}>Rekap</Text>
                 </TouchableOpacity>
+                
                 <TouchableOpacity style={styles.mainButton} onPress={handleResetPoints}>
                   <View style={[styles.iconCircle, { backgroundColor: '#fee2e2' }]}><Ionicons name="trash-bin" size={28} color="#dc2626" /></View>
                   <Text style={[styles.btnTitle, {color:'#dc2626'}]}>Reset</Text>
                 </TouchableOpacity>
+
                 <TouchableOpacity style={styles.mainButton} onPress={handleTriggerSOS} disabled={activeSOS !== null}>
                   <View style={[styles.iconCircle, { backgroundColor: activeSOS ? '#e2e8f0' : '#fee2e2' }]}><Ionicons name="alert-circle" size={28} color={activeSOS ? "#94a3b8" : "#dc2626"} /></View>
                   <Text style={[styles.btnTitle, {color: activeSOS ? "#94a3b8" : "#dc2626"}]}>SOS</Text>
@@ -503,10 +564,18 @@ export default function Dashboard({ user, userData, onLogout }) {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
              <Text style={styles.modalTitle}>📢 Update Info Berjalan</Text>
-             <TextInput style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color: 'black'}} multiline placeholder="Tulis pengumuman..." value={tempAnnounce} onChangeText={setTempAnnounce}/>
+             <TextInput 
+               style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color: 'black'}}
+               multiline
+               placeholder="Tulis pengumuman di sini..."
+               value={tempAnnounce} 
+               onChangeText={setTempAnnounce}
+             />
              <View style={styles.modalFooter}>
                <TouchableOpacity onPress={() => setEditAnnounceVisible(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity>
-               <TouchableOpacity onPress={handleUpdateAnnouncement} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity>
+               <TouchableOpacity onPress={() => {
+                   handleUpdateAnnouncement();
+               }} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity>
              </View>
           </View>
         </View>
@@ -538,8 +607,10 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
   header: { padding: 20, paddingTop: 20, borderBottomLeftRadius: 30, borderBottomRightRadius: 30, paddingBottom: 60, elevation: 5 },
   headerTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, alignItems: 'flex-start' }, 
+  
   headerLogoContainer: { flexDirection: 'row', alignItems: 'center', flex: 1 }, 
   headerLogo: { width: 50, height: 50, resizeMode: 'contain', marginRight: 12 },
+
   welcomeText: { color: '#e2e8f0', fontSize: 12 },
   nameText: { color: 'white', fontSize: 20, fontWeight: 'bold' },
   roleBadge: { backgroundColor: 'rgba(255,255,255,0.2)', alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12, marginTop: 4 },
@@ -548,9 +619,19 @@ const styles = StyleSheet.create({
   scoreCard: { position: 'absolute', bottom: -30, left: 20, right: 20, backgroundColor: 'white', borderRadius: 15, padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', elevation: 4 },
   scoreLabel: { color: '#64748b', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' },
   scoreValue: { color: '#1e293b', fontSize: 28, fontWeight: '900' },
-  marqueeContainer: { marginTop: 0, paddingTop: 40, paddingBottom: 10, backgroundColor: '#fff7ed', overflow: 'hidden', borderBottomWidth: 1, borderBottomColor: '#fed7aa' },
+  
+  marqueeContainer: { 
+    marginTop: 0, 
+    paddingTop: 40, 
+    paddingBottom: 10,
+    backgroundColor: '#fff7ed', 
+    overflow: 'hidden', 
+    borderBottomWidth: 1, 
+    borderBottomColor: '#fed7aa' 
+  },
   marqueeText: { fontSize: 14, color: '#c2410c', fontWeight: 'bold' },
   editBadge: { position: 'absolute', right: 10, top: 40, backgroundColor: '#ea580c', padding: 4, borderRadius: 4, zIndex:10 },
+
   body: { flex: 1, marginTop: 40, paddingHorizontal: 20 },
   menuGrid: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap' },
   mainButton: { backgroundColor: 'white', width: '23%', padding: 8, borderRadius: 12, alignItems: 'center', elevation: 2, marginBottom: 15 },
