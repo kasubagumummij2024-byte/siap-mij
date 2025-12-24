@@ -457,10 +457,12 @@ export default function Dashboard({ user, userData, onLogout }) {
               <Text style={[styles.btnTitle, { color: hasCheckedIn ? '#334155' : '#94a3b8' }]}>Lapor</Text>
             </TouchableOpacity>
 
-            {/* REVISI: TOMBOL IZIN SELALU MUNCUL, VALIDASINYA DI MODAL */}
-            {userStatus === 'active' && (
+            {/* REVISI: Tombol Izin HANYA muncul jika User Aktif DAN BUKAN Kabag TU */}
+            {userStatus === 'active' && !isKabag && (
               <TouchableOpacity style={[styles.mainButton, { opacity: hasCheckedIn ? 1 : 0.5 }]} onPress={() => handleProtectedPress('izin')}>
-                <View style={[styles.iconCircle, { backgroundColor: hasCheckedIn ? '#f3e8ff' : '#f1f5f9' }]}><Ionicons name="time" size={28} color={hasCheckedIn ? "#9333ea" : "#94a3b8"} /></View>
+                <View style={[styles.iconCircle, { backgroundColor: hasCheckedIn ? '#f3e8ff' : '#f1f5f9' }]}>
+                  <Ionicons name="time" size={28} color={hasCheckedIn ? "#9333ea" : "#94a3b8"} />
+                </View>
                 <Text style={[styles.btnTitle, { color: hasCheckedIn ? '#334155' : '#94a3b8' }]}>Izin</Text>
               </TouchableOpacity>
             )}
