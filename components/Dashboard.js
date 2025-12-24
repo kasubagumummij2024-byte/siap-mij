@@ -1,17 +1,13 @@
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import NetInfo from '@react-native-community/netinfo';
 import { Audio } from 'expo-av';
 import * as Sharing from 'expo-sharing';
 import { addDoc, collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Animated, Dimensions, Easing, FlatList, Image, Modal, RefreshControl, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-
-// --- 1. IMPORT BARU UNTUK SYNC ---
-import NetInfo from '@react-native-community/netinfo';
-import { syncData } from '../utils/syncService'; // Pastikan path foldernya benar
-// ---------------------------------
-
 import { db } from '../firebaseConfig';
+import { syncData } from '../utils/syncService';
 import ApprovalList from './ApprovalList';
 import AttendanceModal from './AttendanceModal';
 import ChangePasswordModal from './ChangePasswordModal';
@@ -36,21 +32,17 @@ export default function Dashboard({ user, userData, onLogout }) {
   // --- STATES ---
   const [hasCheckedIn, setHasCheckedIn] = useState(false); 
   const [activeSOS, setActiveSOS] = useState(null); 
-  
   const [passModalVisible, setPassModalVisible] = useState(false); 
   const [announcement, setAnnouncement] = useState("Selamat datang di aplikasi SIAP-MIJ Mobile."); 
   const [editAnnounceVisible, setEditAnnounceVisible] = useState(false); 
   const [tempAnnounce, setTempAnnounce] = useState("");
 
-  // REF UNTUK SUARA SIRINE
   const soundRef = useRef(null);
-
   const translateX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
   
   const [modalVisible, setModalVisible] = useState(false);
   const [permModalVisible, setPermModalVisible] = useState(false);
   const [attModalVisible, setAttModalVisible] = useState(false); 
-  
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [dateFrom, setDateFrom] = useState(new Date());
@@ -58,118 +50,86 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [showPicker, setShowPicker] = useState(false);
   const [pickerMode, setPickerMode] = useState('from');
 
-  const isKasubag = userData?.jabatan === 'kasubag';
-  const isCommander = ['commander', 'koordinator'].includes(userData?.jabatan);
+  // Identifikasi Role (Untuk UI)
+  const isKasubag = userData?.jabatan?.includes('kasubag'); // Tangkap 'kasubag_umum', 'kasubag_logistik'
+  const isKabag = userData?.jabatan === 'kabag_tu';
+  const isCommander = userData?.jabatan === 'commander';
+  const isKoordinator = userData?.jabatan === 'koordinator';
+  const isManagement = userData?.divisi === 'management' || isKasubag || isKabag; // Grup Pimpinan (Poin 8)
+  const isLeader = isManagement || isCommander || isKoordinator;
 
   const themeColor = userData?.divisi === 'security' ? '#2563eb' : 
                       userData?.divisi === 'cleaning' ? '#16a34a' : 
                       userData?.divisi === 'management' ? '#7c3aed' : '#ea580c';
 
-  // --- LOGIKA SUARA SIRINE ---
+  // --- LOGIKA SUARA SIRINE (REVISI POIN 9: TIDAK BUNYI DI HP SENDIRI) ---
   useEffect(() => {
     let isCancelled = false; 
-
     const manageSiren = async () => {
       if (activeSOS) {
-        if (soundRef.current?._loaded) return;
+        // JANGAN BUNYI JIKA SAYA PELAKUNYA
+        if (activeSOS.userId === user.uid) return; 
 
+        if (soundRef.current?._loaded) return;
         try {
           await Audio.setAudioModeAsync({
             playsInSilentModeIOS: true,
             staysActiveInBackground: true,
             shouldDuckAndroid: true,
           });
-
           const { sound } = await Audio.Sound.createAsync(
              require('../assets/siren.mp3'),
              { shouldPlay: true, isLooping: true, volume: 1.0 }
           );
-
           if (isCancelled || !activeSOS) {
              await sound.unloadAsync();
              return;
           }
-
           soundRef.current = sound;
-        } catch (error) {
-           console.log("Gagal memuat sirine:", error);
-        }
+        } catch (error) { console.log("Gagal memuat sirine:", error); }
       } 
       else {
         if (soundRef.current) {
           try {
             await soundRef.current.stopAsync();
             await soundRef.current.unloadAsync();
-          } catch (e) {
-            console.log("Error saat stop:", e);
-          } finally {
-            soundRef.current = null; 
-          }
+          } catch (e) { console.log("Error saat stop:", e); } 
+          finally { soundRef.current = null; }
         }
       }
     };
-
     manageSiren();
-
-    return () => {
-      isCancelled = true;
-    };
+    return () => { isCancelled = true; };
   }, [activeSOS]);
 
-  // --- ANIMASI RUNNING TEXT (REVISI: INFINITE LOOP) ---
+  // --- ANIMASI RUNNING TEXT ---
   useEffect(() => {
-    let stopAnimation = false; // Flag untuk menghentikan animasi saat layar ditutup
-
+    let stopAnimation = false; 
     const startAnimation = () => {
-      if (stopAnimation) return; // Stop jika komponen sudah tidak aktif
-
-      // 1. RESET POSISI: Kembalikan teks ke paling kanan layar
+      if (stopAnimation) return; 
       translateX.setValue(SCREEN_WIDTH); 
-
-      // 2. HITUNG DURASI: Agar kecepatan stabil (Teks panjang = lebih lambat)
       const textLength = announcement ? announcement.length : 20;
-      const duration = 5000 + (textLength * 200); // Rumus kecepatan: Dasar 5 detik + per karakter
-
-      // 3. MULAI ANIMASI
+      const duration = 5000 + (textLength * 200); 
       Animated.timing(translateX, {
-        toValue: -SCREEN_WIDTH * 2, // Bergerak ke kiri sampai hilang
+        toValue: -SCREEN_WIDTH * 2, 
         duration: duration, 
-        easing: Easing.linear, // Gerakan rata (tidak ada percepatan/perlambatan)
+        easing: Easing.linear, 
         useNativeDriver: true,
       }).start(({ finished }) => {
-        // 4. JIKA SELESAI & TIDAK DI-STOP: Ulangi lagi
-        if (finished && !stopAnimation) {
-          startAnimation(); 
-        }
+        if (finished && !stopAnimation) { startAnimation(); }
       });
     };
-
-    // Jalankan pertama kali
     startAnimation();
-
-    // Cleanup: Matikan animasi jika user pindah halaman/logout
-    return () => {
-      stopAnimation = true;
-    };
-  }, [announcement]); // Animasi reset ulang jika isi pengumuman berubah 
+    return () => { stopAnimation = true; };
+  }, [announcement]); 
 
   // --- LISTENER PENGUMUMAN ---
   useEffect(() => {
     const docRef = doc(db, "app_config", "announcement");
-    const unsubscribe = onSnapshot(docRef, 
-      (docSnap) => {
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if(data.text) {
-            setAnnouncement(data.text);
-          }
-        } else {
-          setAnnouncement("Selamat Datang (Mode Offline/Default)");
-        }
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+        if (docSnap.exists() && docSnap.data().text) { setAnnouncement(docSnap.data().text); }
       }, 
-      (error) => {
-        console.error("ERROR PERMISSION/KONEKSI:", error.message);
-      }
+      (error) => { console.error("Error Announcement:", error.message); }
     );
     return () => unsubscribe();
   }, []);
@@ -182,9 +142,7 @@ export default function Dashboard({ user, userData, onLogout }) {
         const sosData = snapshot.docs[0].data();
         sosData.id = snapshot.docs[0].id; 
         setActiveSOS(sosData);
-      } else {
-        setActiveSOS(null);
-      }
+      } else { setActiveSOS(null); }
     });
     return () => unsubscribe();
   }, []);
@@ -208,7 +166,7 @@ export default function Dashboard({ user, userData, onLogout }) {
     return () => clearInterval(interval);
   }, [userStatus, userData]);
 
-  // --- FETCH DATA UTAMA ---
+  // --- FETCH DATA UTAMA (REVISI POIN 8: MANAGEMENT LIHAT SEMUA) ---
   const checkDailyAttendance = async () => {
     try {
       const now = new Date();
@@ -225,11 +183,7 @@ export default function Dashboard({ user, userData, onLogout }) {
       
       const snap = await getDocs(q);
       setHasCheckedIn(!snap.empty);
-
-    } catch (e) { 
-      console.log("Error checking attendance", e); 
-      setHasCheckedIn(false);
-    }
+    } catch (e) { setHasCheckedIn(false); }
   };
 
   const fetchData = async () => {
@@ -248,23 +202,29 @@ export default function Dashboard({ user, userData, onLogout }) {
         userData.statusReason = data.statusReason;
         userData.replacingWho = data.replacingWho;
       }
+
       let q;
       const reportsRef = collection(db, "reports");
-      if (isKasubag) {
-        q = query(reportsRef, orderBy("timestamp", "desc"), limit(20));
-      } else if (isCommander) {
+      
+      // LOGIKA MONITORING (POIN 8)
+      if (isManagement) {
+        // Management (Kasubag, Kabag) melihat SEMUA laporan
+        q = query(reportsRef, orderBy("timestamp", "desc"), limit(30));
+      } else if (isCommander || isKoordinator) {
+        // Commander/Koord melihat laporan Divisinya saja
         const div = userData?.divisi || "umum";
         q = query(reportsRef, where("userDivisi", "==", div), orderBy("timestamp", "desc"), limit(20));
       } else {
+        // Anggota biasa melihat laporan sendiri
         q = query(reportsRef, where("userId", "==", user.uid), orderBy("timestamp", "desc"), limit(20));
       }
+
       const querySnapshot = await getDocs(q);
       const reports = [];
       querySnapshot.forEach((doc) => reports.push({ id: doc.id, ...doc.data() }));
       setReportList(reports);
     } catch (error) { 
-      console.error("ERROR FETCH DATA:", error);
-      Alert.alert("Gagal Memuat Data", "Terjadi gangguan saat mengambil data. Pastikan koneksi internet lancar."); 
+      Alert.alert("Gagal Memuat Data", "Cek koneksi internet."); 
     } finally { 
       setRefreshing(false); 
       setLoadingReports(false); 
@@ -273,41 +233,27 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   useEffect(() => { fetchData(); }, []);
 
-  // --- 2. LOGIC BARU: AUTO SYNC LISTENER ---
+  // --- AUTO SYNC ---
   useEffect(() => {
-    // Listener ini akan aktif setiap kali status jaringan berubah
     const unsubscribe = NetInfo.addEventListener(state => {
-      // Jika Internet CONNECTED & REACHABLE
       if (state.isConnected && state.isInternetReachable) {
-        
-        // Panggil fungsi syncService
         syncData().then((count) => {
           if (count > 0) {
-            // Jika ada data yang berhasil diupload
-            Alert.alert(
-              "Sinkronisasi Berhasil", 
-              `${count} laporan offline Anda telah terkirim ke server.`
-            );
-            // Refresh halaman agar laporan baru muncul di list & poin update
+            Alert.alert("Sinkronisasi Berhasil", `${count} laporan terkirim.`);
             fetchData(); 
           }
         });
-
       }
     });
-
     return () => unsubscribe();
   }, []);
-  // ------------------------------------------
 
 
-  // --- FUNGSI-FUNGSI TOMBOL ---
+  // --- HANDLERS ---
   const handleUpdateAnnouncement = async () => {
     try {
       await setDoc(doc(db, "app_config", "announcement"), {
-        text: tempAnnounce,
-        updatedBy: user.uid,
-        updatedAt: serverTimestamp()
+        text: tempAnnounce, updatedBy: user.uid, updatedAt: serverTimestamp()
       }, { merge: true });
       setEditAnnounceVisible(false);
       Alert.alert("Sukses", "Pengumuman diperbarui.");
@@ -315,48 +261,35 @@ export default function Dashboard({ user, userData, onLogout }) {
   };
 
   const handleResetPoints = async () => {
-    Alert.alert(
-      "⚠️ PERINGATAN KERAS",
-      "Apakah Anda yakin ingin MERESET POIN SEMUA ANGGOTA menjadi 0? Tindakan ini tidak dapat dibatalkan!",
-      [
-        { text: "BATAL", style: "cancel" },
-        { 
-          text: "YA, RESET SEMUA", 
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              setRefreshing(true);
-              const batch = writeBatch(db);
-              const usersRef = collection(db, "users");
-              const snapshot = await getDocs(usersRef);
-              snapshot.docs.forEach((doc) => {
-                batch.update(doc.ref, { total_poin: 0 });
-              });
-              await batch.commit();
-              Alert.alert("Sukses", "Poin seluruh anggota telah di-reset menjadi 0.");
-              fetchData();
-            } catch (error) { Alert.alert("Error", error.message); } 
-            finally { setRefreshing(false); }
-          }
+    Alert.alert("PERINGATAN", "Reset SEMUA poin anggota jadi 0?", [
+      { text: "BATAL", style: "cancel" },
+      { text: "YA, RESET", style: 'destructive', onPress: async () => {
+          try {
+            setRefreshing(true);
+            const batch = writeBatch(db);
+            const usersRef = collection(db, "users");
+            const snapshot = await getDocs(usersRef);
+            snapshot.docs.forEach((doc) => batch.update(doc.ref, { total_poin: 0 }));
+            await batch.commit();
+            Alert.alert("Sukses", "Poin di-reset.");
+            fetchData();
+          } catch (error) { Alert.alert("Error", error.message); } 
+          finally { setRefreshing(false); }
         }
-      ]
-    );
+      }
+    ]);
   };
 
   const handleTriggerSOS = () => {
-    if (activeSOS) {
-      Alert.alert("SOS Sedang Aktif", `Sinyal SOS sedang menyala oleh ${activeSOS.userName}`);
-      return;
-    }
-    Alert.alert("KONFIRMASI BAHAYA", "Nyalakan sinyal SOS ke semua unit?", [
+    if (activeSOS) return;
+    Alert.alert("BAHAYA", "Nyalakan sinyal SOS?", [
         { text: "Batal", style: "cancel" },
-        { text: "YA, NYALAKAN", style: 'destructive', onPress: async () => {
+        { text: "NYALAKAN", style: 'destructive', onPress: async () => {
             try {
               await addDoc(collection(db, "active_sos"), {
                 userId: user.uid, userName: userData?.nama || "Anggota", userDivisi: userData?.divisi || "-",
                 status: "ACTIVE", createdAt: serverTimestamp(),
               });
-              Alert.alert("SOS TERKIRIM", "Semua unit akan menerima alarm bahaya.");
             } catch (e) { Alert.alert("Error", e.message); }
         }}
     ]);
@@ -364,24 +297,24 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   const handleResolveSOS = async () => {
     if (!activeSOS) return;
-    const isOwner = activeSOS.userId === user.uid;
-    if (isOwner || isKasubag) {
-      Alert.alert("Matikan Sinyal?", "Pastikan kondisi sudah aman. Suara sirine akan dimatikan di semua unit.", [
+    // Poin 9: Siapapun yg punya akses tombol ini bisa mematikan
+    const canResolve = activeSOS.userId === user.uid || isManagement;
+    if (canResolve) {
+      Alert.alert("Matikan Sinyal?", "Pastikan kondisi aman.", [
         { text: "Belum", style: "cancel" },
-        { text: "SUDAH AMAN", onPress: async () => {
+        { text: "AMAN", onPress: async () => {
             try {
               const sosRef = doc(db, "active_sos", activeSOS.id);
               await updateDoc(sosRef, { status: "RESOLVED", resolvedBy: user.uid, resolvedAt: serverTimestamp() });
-              Alert.alert("Info", "Status SOS telah dimatikan.");
             } catch (e) { Alert.alert("Error", e.message); }
         }}
       ]);
-    } else { Alert.alert("Akses Ditolak", "Hanya Kasubag atau pelapor yang bisa mematikan SOS."); }
+    } else { Alert.alert("Akses Ditolak", "Anda tidak berhak mematikan SOS ini."); }
   };
 
   const handleProtectedPress = (type) => {
     if (!hasCheckedIn) {
-      Alert.alert("Belum Absen", "Silakan Absen Masuk terlebih dahulu.", [{ text: "OK", onPress: () => setAttModalVisible(true) }]);
+      Alert.alert("Belum Absen", "Silakan Absen Masuk dulu.", [{ text: "OK", onPress: () => setAttModalVisible(true) }]);
       return;
     }
     if (type === 'laporan') setModalVisible(true);
@@ -403,16 +336,14 @@ export default function Dashboard({ user, userData, onLogout }) {
 
       const qRep = query(collection(db, "reports"), where("timestamp", ">=", startDate), where("timestamp", "<=", endDate), orderBy("timestamp", "desc"));
       const reportsSnap = await getDocs(qRep);
-      if (reportsSnap.empty) { Alert.alert("Kosong", "Tidak ada data laporan."); setDownloading(false); return; }
+      if (reportsSnap.empty) { Alert.alert("Kosong", "Tidak ada data."); setDownloading(false); return; }
 
       const qAtt = query(collection(db, "attendance"), where("date", ">=", startStr), where("date", "<=", endStr));
       const attSnap = await getDocs(qAtt);
       const attendanceMap = {};
       attSnap.forEach(doc => {
         const d = doc.data();
-        const key = `${d.userId}_${d.date}`;
-        const shiftInfo = (d.shift && d.shift !== 'Non-Shift') ? `(${d.shift})` : '';
-        attendanceMap[key] = `${d.status} ${shiftInfo}`.trim();
+        attendanceMap[`${d.userId}_${d.date}`] = `${d.status} ${d.shift !== 'Non-Shift' ? '('+d.shift+')' : ''}`.trim();
       });
 
       let csvContent = "Tanggal;Jam;Nama;Divisi;Status Absensi;Lokasi;Keterangan;Foto\n";
@@ -420,16 +351,14 @@ export default function Dashboard({ user, userData, onLogout }) {
         const data = doc.data();
         const d = data.timestamp ? data.timestamp.toDate() : new Date();
         const dateOnlyStr = d.toISOString().split('T')[0];
-        const lookupKey = `${data.userId}_${dateOnlyStr}`;
-        const absensiStatus = attendanceMap[lookupKey] || "Belum Absen";
+        const absensiStatus = attendanceMap[`${data.userId}_${dateOnlyStr}`] || "Belum Absen";
         const desc = data.description ? data.description.replace(/;/g, ",").replace(/\n/g, " ") : "-";
         csvContent += `${d.toLocaleDateString()};${d.toLocaleTimeString()};${data.userName};${data.userDivisi};${absensiStatus};${data.locationName};${desc};${data.photoUrl}\n`;
       });
 
-      const filename = FileSystem.documentDirectory + "Rekap_Lengkap.csv";
+      const filename = FileSystem.documentDirectory + "Rekap.csv";
       await FileSystem.writeAsStringAsync(filename, csvContent, { encoding: 'utf8' });
       if (await Sharing.isAvailableAsync()) { await Sharing.shareAsync(filename); setShowDownloadModal(false); }
-      else { Alert.alert("Gagal", "Tidak bisa share."); }
     } catch (error) { Alert.alert("Error", error.message); } 
     finally { setDownloading(false); }
   };
@@ -450,7 +379,7 @@ export default function Dashboard({ user, userData, onLogout }) {
       <Image source={{ uri: item.photoUrl }} style={styles.cardImage} />
       <View style={styles.cardContent}>
         <View style={styles.cardHeader}><Text style={styles.cardLocation}>{item.locationName}</Text><Text style={styles.cardTime}>{formatTime(item.timestamp)}</Text></View>
-        {(isKasubag || isCommander) && <Text style={styles.reporterName}>👤 {item.userName}</Text>}
+        {isLeader && <Text style={styles.reporterName}>👤 {item.userName}</Text>}
         <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text>
       </View>
     </View>
@@ -472,7 +401,7 @@ export default function Dashboard({ user, userData, onLogout }) {
         </View>
         <Text style={styles.sosText}>Pelapor: {activeSOS.userName}</Text>
         <Text style={styles.sosText}>Divisi: {activeSOS.userDivisi}</Text>
-        {(activeSOS.userId === user.uid || isKasubag) && (
+        {(activeSOS.userId === user.uid || isManagement) && (
           <TouchableOpacity style={styles.sosResolveBtn} onPress={handleResolveSOS}>
             <Text style={{color: '#dc2626', fontWeight: 'bold'}}>MATIKAN SINYAL / AMAN</Text>
           </TouchableOpacity>
@@ -483,20 +412,9 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity 
-        style={styles.marqueeContainer} 
-        onPress={() => {
-          if (isKasubag) {
-            setTempAnnounce(announcement); 
-            setEditAnnounceVisible(true);
-          }
-        }}
-        activeOpacity={isKasubag ? 0.7 : 1}
-      >
+      <TouchableOpacity style={styles.marqueeContainer} onPress={() => { if (isKasubag) { setTempAnnounce(announcement); setEditAnnounceVisible(true); } }}>
          <Animated.View style={{ transform: [{ translateX }], width: '1000%' }}>
-            <Text key={announcement} style={styles.marqueeText}>
-              📢 {announcement}
-            </Text>
+            <Text key={announcement} style={styles.marqueeText}>📢 {announcement}</Text>
          </Animated.View>
          {isKasubag && <View style={styles.editBadge}><Ionicons name="pencil" size={12} color="white"/></View>}
       </TouchableOpacity>
@@ -513,21 +431,18 @@ export default function Dashboard({ user, userData, onLogout }) {
               </View>
             </View>
           </View>
-
           <View style={{flexDirection: 'row'}}>
-             <TouchableOpacity onPress={() => setPassModalVisible(true)} style={[styles.logoutBtn, {marginRight: 10, backgroundColor: 'rgba(255,255,255,0.2)'}]}>
-               <Ionicons name="key-outline" size={24} color="white" />
-             </TouchableOpacity>
+             <TouchableOpacity onPress={() => setPassModalVisible(true)} style={[styles.logoutBtn, {marginRight: 10, backgroundColor: 'rgba(255,255,255,0.2)'}]}><Ionicons name="key-outline" size={24} color="white" /></TouchableOpacity>
              <TouchableOpacity onPress={onLogout} style={styles.logoutBtn}><Ionicons name="log-out-outline" size={24} color="white" /></TouchableOpacity>
           </View>
         </View>
-        
         <View style={styles.scoreCard}><View><Text style={styles.scoreLabel}>Poin</Text><Text style={styles.scoreValue}>{currentPoints}</Text></View><Ionicons name="trophy" size={40} color="#f59e0b" /></View>
       </View>
       
       <View style={styles.body}>
         {renderSOSBanner()}
-        {isCommander && <ApprovalList commanderData={userData} commanderUid={user.uid} />}
+        {/* REVISI POIN 1-6: ApprovalList sekarang lebih pintar memilah */}
+        {isLeader && <ApprovalList commanderData={userData} commanderUid={user.uid} />}
         {userStatus !== 'active' && renderStatusCard()}
 
         {(userStatus === 'active' || userStatus === 'replacing') && (
@@ -542,6 +457,7 @@ export default function Dashboard({ user, userData, onLogout }) {
               <Text style={[styles.btnTitle, { color: hasCheckedIn ? '#334155' : '#94a3b8' }]}>Lapor</Text>
             </TouchableOpacity>
 
+            {/* REVISI: TOMBOL IZIN SELALU MUNCUL, VALIDASINYA DI MODAL */}
             {userStatus === 'active' && (
               <TouchableOpacity style={[styles.mainButton, { opacity: hasCheckedIn ? 1 : 0.5 }]} onPress={() => handleProtectedPress('izin')}>
                 <View style={[styles.iconCircle, { backgroundColor: hasCheckedIn ? '#f3e8ff' : '#f1f5f9' }]}><Ionicons name="time" size={28} color={hasCheckedIn ? "#9333ea" : "#94a3b8"} /></View>
@@ -549,18 +465,16 @@ export default function Dashboard({ user, userData, onLogout }) {
               </TouchableOpacity>
             )}
 
-            {isKasubag ? (
+            {isManagement ? (
               <>
                 <TouchableOpacity style={styles.mainButton} onPress={() => setShowDownloadModal(true)}>
                   <View style={[styles.iconCircle, { backgroundColor: '#ffedd5' }]}><Ionicons name="download" size={28} color="#ea580c" /></View>
                   <Text style={[styles.btnTitle, {color:'#ea580c'}]}>Rekap</Text>
                 </TouchableOpacity>
-                
                 <TouchableOpacity style={styles.mainButton} onPress={handleResetPoints}>
                   <View style={[styles.iconCircle, { backgroundColor: '#fee2e2' }]}><Ionicons name="trash-bin" size={28} color="#dc2626" /></View>
                   <Text style={[styles.btnTitle, {color:'#dc2626'}]}>Reset</Text>
                 </TouchableOpacity>
-
                 <TouchableOpacity style={styles.mainButton} onPress={handleTriggerSOS} disabled={activeSOS !== null}>
                   <View style={[styles.iconCircle, { backgroundColor: activeSOS ? '#e2e8f0' : '#fee2e2' }]}><Ionicons name="alert-circle" size={28} color={activeSOS ? "#94a3b8" : "#dc2626"} /></View>
                   <Text style={[styles.btnTitle, {color: activeSOS ? "#94a3b8" : "#dc2626"}]}>SOS</Text>
@@ -575,7 +489,7 @@ export default function Dashboard({ user, userData, onLogout }) {
           </View>
         )}
 
-        <Text style={styles.sectionTitle}>{isKasubag ? "Semua Laporan" : isCommander ? "Laporan Divisi Anda" : "Riwayat Laporan"}</Text>
+        <Text style={styles.sectionTitle}>{isManagement ? "Semua Laporan" : isLeader ? "Laporan Divisi Anda" : "Riwayat Laporan"}</Text>
         {loadingReports ? <ActivityIndicator size="large" color={themeColor} /> : (
           <FlatList data={reportList} renderItem={renderReportItem} keyExtractor={item => item.id} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchData} />} contentContainerStyle={{paddingBottom:100}} ListEmptyComponent={<Text style={{textAlign:'center', marginTop:20, color:'#94a3b8'}}>Belum ada data.</Text>}/>
         )}
@@ -587,18 +501,10 @@ export default function Dashboard({ user, userData, onLogout }) {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
              <Text style={styles.modalTitle}>📢 Update Info Berjalan</Text>
-             <TextInput 
-               style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color: 'black'}}
-               multiline
-               placeholder="Tulis pengumuman di sini..."
-               value={tempAnnounce} 
-               onChangeText={setTempAnnounce}
-             />
+             <TextInput style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color: 'black'}} multiline placeholder="Tulis pengumuman..." value={tempAnnounce} onChangeText={setTempAnnounce}/>
              <View style={styles.modalFooter}>
                <TouchableOpacity onPress={() => setEditAnnounceVisible(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity>
-               <TouchableOpacity onPress={() => {
-                   handleUpdateAnnouncement();
-               }} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity>
+               <TouchableOpacity onPress={handleUpdateAnnouncement} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity>
              </View>
           </View>
         </View>
@@ -630,10 +536,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
   header: { padding: 20, paddingTop: 20, borderBottomLeftRadius: 30, borderBottomRightRadius: 30, paddingBottom: 60, elevation: 5 },
   headerTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, alignItems: 'flex-start' }, 
-  
   headerLogoContainer: { flexDirection: 'row', alignItems: 'center', flex: 1 }, 
   headerLogo: { width: 50, height: 50, resizeMode: 'contain', marginRight: 12 },
-
   welcomeText: { color: '#e2e8f0', fontSize: 12 },
   nameText: { color: 'white', fontSize: 20, fontWeight: 'bold' },
   roleBadge: { backgroundColor: 'rgba(255,255,255,0.2)', alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12, marginTop: 4 },
@@ -642,19 +546,9 @@ const styles = StyleSheet.create({
   scoreCard: { position: 'absolute', bottom: -30, left: 20, right: 20, backgroundColor: 'white', borderRadius: 15, padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', elevation: 4 },
   scoreLabel: { color: '#64748b', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' },
   scoreValue: { color: '#1e293b', fontSize: 28, fontWeight: '900' },
-  
-  marqueeContainer: { 
-    marginTop: 0, 
-    paddingTop: 40, 
-    paddingBottom: 10,
-    backgroundColor: '#fff7ed', 
-    overflow: 'hidden', 
-    borderBottomWidth: 1, 
-    borderBottomColor: '#fed7aa' 
-  },
+  marqueeContainer: { marginTop: 0, paddingTop: 40, paddingBottom: 10, backgroundColor: '#fff7ed', overflow: 'hidden', borderBottomWidth: 1, borderBottomColor: '#fed7aa' },
   marqueeText: { fontSize: 14, color: '#c2410c', fontWeight: 'bold' },
   editBadge: { position: 'absolute', right: 10, top: 40, backgroundColor: '#ea580c', padding: 4, borderRadius: 4, zIndex:10 },
-
   body: { flex: 1, marginTop: 40, paddingHorizontal: 20 },
   menuGrid: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap' },
   mainButton: { backgroundColor: 'white', width: '23%', padding: 8, borderRadius: 12, alignItems: 'center', elevation: 2, marginBottom: 15 },

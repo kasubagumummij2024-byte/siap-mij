@@ -1,13 +1,24 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, Modal, TouchableOpacity, TextInput, Alert, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { db } from '../firebaseConfig';
 
 export default function PermissionModal({ visible, onClose, user, userData, onSuccess }) {
   const [reason, setReason] = useState('');
   const [loading, setLoading] = useState(false);
-  const [type, setType] = useState('break'); // 'break' (Istirahat) atau 'permit' (Izin Keluar)
+  
+  // Default type: Security bisa 'break', yang lain langsung 'permit'
+  const isSecurity = userData?.divisi === 'security';
+  const [type, setType] = useState(isSecurity ? 'break' : 'permit'); 
+
+  // Reset state saat modal dibuka
+  useEffect(() => {
+    if (visible) {
+        setReason('');
+        setType(isSecurity ? 'break' : 'permit');
+    }
+  }, [visible, isSecurity]);
 
   const handleSubmit = async () => {
     // Validasi input
@@ -20,18 +31,15 @@ export default function PermissionModal({ visible, onClose, user, userData, onSu
     try {
       const userRef = doc(db, "users", user.uid);
       
-      // Update status menjadi PENDING (Menunggu Persetujuan)
-      // Kita simpan detail requestnya agar Komandan bisa baca
       await updateDoc(userRef, {
-        status: 'pending',          // Status gantung
+        status: 'pending',          // Status gantung menunggu approval
         requestType: type,          // 'break' atau 'permit'
         requestReason: type === 'break' ? 'Istirahat Rutin (40 Menit)' : reason,
         requestTime: serverTimestamp()
       });
       
-      Alert.alert("Permintaan Terkirim", "Mohon tunggu persetujuan Komandan/Koordinator.");
-      onSuccess(); // Refresh Dashboard
-      setReason('');
+      Alert.alert("Permintaan Terkirim", "Mohon tunggu persetujuan Pimpinan.");
+      onSuccess(); 
       onClose();
 
     } catch (error) {
@@ -48,16 +56,27 @@ export default function PermissionModal({ visible, onClose, user, userData, onSu
         <View style={styles.container}>
           <Text style={styles.title}>Pengajuan Izin</Text>
           
-          <View style={styles.tabContainer}>
-            <TouchableOpacity style={[styles.tab, type === 'break' && styles.activeTab]} onPress={() => setType('break')}>
-              <Ionicons name="cafe" size={20} color={type === 'break' ? 'white' : '#64748b'} />
-              <Text style={[styles.tabText, type === 'break' && styles.activeTabText]}>Istirahat</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.tab, type === 'permit' && styles.activeTab]} onPress={() => setType('permit')}>
-              <Ionicons name="exit" size={20} color={type === 'permit' ? 'white' : '#64748b'} />
-              <Text style={[styles.tabText, type === 'permit' && styles.activeTabText]}>Izin Keluar</Text>
-            </TouchableOpacity>
-          </View>
+          {/* HANYA SECURITY YANG LIHAT PILIHAN ISTIRAHAT */}
+          {isSecurity ? (
+              <View style={styles.tabContainer}>
+                <TouchableOpacity style={[styles.tab, type === 'break' && styles.activeTab]} onPress={() => setType('break')}>
+                  <Ionicons name="cafe" size={20} color={type === 'break' ? 'white' : '#64748b'} />
+                  <Text style={[styles.tabText, type === 'break' && styles.activeTabText]}>Istirahat</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.tab, type === 'permit' && styles.activeTab]} onPress={() => setType('permit')}>
+                  <Ionicons name="exit" size={20} color={type === 'permit' ? 'white' : '#64748b'} />
+                  <Text style={[styles.tabText, type === 'permit' && styles.activeTabText]}>Izin Keluar</Text>
+                </TouchableOpacity>
+              </View>
+          ) : (
+              // BUKAN SECURITY: Judul Statis
+              <View style={[styles.tabContainer, {backgroundColor: '#e0f2fe'}]}>
+                  <View style={[styles.tab, styles.activeTab, {backgroundColor: '#0ea5e9'}]}>
+                    <Ionicons name="exit" size={20} color="white" />
+                    <Text style={[styles.tabText, styles.activeTabText]}>Izin Keluar</Text>
+                  </View>
+              </View>
+          )}
 
           <View style={styles.content}>
             {type === 'break' ? (
