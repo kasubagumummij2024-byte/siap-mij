@@ -29,6 +29,7 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [userStatus, setUserStatus] = useState(userData?.status || 'active'); 
   const [breakLeft, setBreakLeft] = useState(''); 
   const [reportList, setReportList] = useState([]);
+  const [permitList, setPermitList] = useState([]); // STATE BARU: List Orang Izin
   const [loadingReports, setLoadingReports] = useState(true);
 
   // --- STATES ---
@@ -38,6 +39,10 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [announcement, setAnnouncement] = useState("Selamat datang di aplikasi SIAP-MIJ Mobile."); 
   const [editAnnounceVisible, setEditAnnounceVisible] = useState(false); 
   const [tempAnnounce, setTempAnnounce] = useState("");
+
+  // STATE BARU: SEARCH & TAB
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeTab, setActiveTab] = useState('laporan'); // 'laporan' atau 'pantauan'
 
   // STATE BARU: STATUS KADALUARSA (FORCE UPDATE)
   const [isObsolete, setIsObsolete] = useState(false);
@@ -69,13 +74,10 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   // --- 1. LOGIC FORCE UPDATE (SISTEM PERTAHANAN) ---
   useEffect(() => {
-    // Dengarkan dokumen 'app_config/settings'
     const unsubscribe = onSnapshot(doc(db, "app_config", "settings"), (docSnap) => {
         if (docSnap.exists()) {
-            const minVersion = docSnap.data().minVersion; // Misal: "1.1.3"
-            const currentVersion = Constants.expoConfig?.version || '1.0.0'; // Versi HP User
-            
-            // Jika Versi HP < Versi Minimal di Database, kunci aplikasi
+            const minVersion = docSnap.data().minVersion; 
+            const currentVersion = Constants.expoConfig?.version || '1.0.0'; 
             if (compareVersion(currentVersion, minVersion) < 0) {
                 setIsObsolete(true); 
             }
@@ -84,7 +86,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     return () => unsubscribe();
   }, []);
 
-  // Helper: Bandingkan Versi
   const compareVersion = (v1, v2) => {
     if (!v1 || !v2) return 0;
     const v1Parts = v1.split('.').map(Number);
@@ -98,14 +99,12 @@ export default function Dashboard({ user, userData, onLogout }) {
     return 0;
   };
 
-  // --- 2. LOGIKA SUARA SIRINE (REVISI: TIDAK BUNYI DI HP SENDIRI) ---
+  // --- 2. LOGIKA SUARA SIRINE ---
   useEffect(() => {
     let isCancelled = false; 
     const manageSiren = async () => {
       if (activeSOS) {
-        // JANGAN BUNYI JIKA SAYA PELAKUNYA
         if (activeSOS.userId === user.uid) return; 
-
         if (soundRef.current?._loaded) return;
         try {
           await Audio.setAudioModeAsync({
@@ -230,24 +229,38 @@ export default function Dashboard({ user, userData, onLogout }) {
         userData.replacingWho = data.replacingWho;
       }
 
+      // --- 1. GET REPORT LIST ---
       let q;
       const reportsRef = collection(db, "reports");
-      
-      // LOGIKA MONITORING (POIN 8)
       if (isManagement) {
-        // Management melihat SEMUA laporan
-        q = query(reportsRef, orderBy("timestamp", "desc"), limit(30));
+        q = query(reportsRef, orderBy("timestamp", "desc"), limit(50));
       } else if (isCommander || isKoordinator) {
         const div = userData?.divisi || "umum";
         q = query(reportsRef, where("userDivisi", "==", div), orderBy("timestamp", "desc"), limit(20));
       } else {
         q = query(reportsRef, where("userId", "==", user.uid), orderBy("timestamp", "desc"), limit(20));
       }
-
       const querySnapshot = await getDocs(q);
       const reports = [];
       querySnapshot.forEach((doc) => reports.push({ id: doc.id, ...doc.data() }));
       setReportList(reports);
+
+      // --- 2. GET PERMIT LIST (KHUSUS MANAGEMENT) ---
+      if (isManagement) {
+          const usersRef = collection(db, "users");
+          // Ambil semua user lalu filter di client (karena query '!= active' butuh index khusus)
+          const allUsersSnap = await getDocs(usersRef);
+          const activePermits = [];
+          allUsersSnap.forEach(doc => {
+             const d = doc.data();
+             // Jika status bukan active (berarti sedang izin/pending/replacing)
+             if (d.status && d.status !== 'active') {
+                 activePermits.push({id: doc.id, ...d});
+             }
+          });
+          setPermitList(activePermits);
+      }
+
     } catch (error) { 
       Alert.alert("Gagal Memuat Data", "Cek koneksi internet."); 
     } finally { 
@@ -258,7 +271,7 @@ export default function Dashboard({ user, userData, onLogout }) {
 
   useEffect(() => { fetchData(); }, []);
 
-  // --- AUTO SYNC (TETAP ADA) ---
+  // --- AUTO SYNC ---
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener(state => {
       if (state.isConnected && state.isInternetReachable) {
@@ -273,6 +286,24 @@ export default function Dashboard({ user, userData, onLogout }) {
     return () => unsubscribe();
   }, []);
 
+  // --- FILTERED DATA (LOGIC PENCARIAN) ---
+  const getFilteredReports = () => {
+      if (!searchQuery) return reportList;
+      return reportList.filter(item => 
+          item.userName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          item.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          item.userDivisi.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+  };
+
+  const getFilteredPermits = () => {
+      if (!searchQuery) return permitList;
+      return permitList.filter(item => 
+          item.nama.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          item.divisi.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (item.statusReason && item.statusReason.toLowerCase().includes(searchQuery.toLowerCase()))
+      );
+  };
 
   // --- HANDLERS ---
   const handleUpdateAnnouncement = async () => {
@@ -370,7 +401,7 @@ export default function Dashboard({ user, userData, onLogout }) {
         attendanceMap[`${d.userId}_${d.date}`] = `${d.status} ${d.shift !== 'Non-Shift' ? '('+d.shift+')' : ''}`.trim();
       });
 
-      let csvContent = "Tanggal;Jam;Nama;Divisi;Absensi;Lokasi;Ket;Foto\n";
+      let csvContent = "Tanggal;Jam;Nama;Divisi;Status Absensi;Lokasi;Keterangan;Foto\n";
       reportsSnap.forEach((doc) => {
         const data = doc.data();
         const d = data.timestamp ? data.timestamp.toDate() : new Date();
@@ -397,6 +428,8 @@ export default function Dashboard({ user, userData, onLogout }) {
     ]);
   };
 
+  const formatTime = (ts) => ts ? ts.toDate().toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : "-";
+  
   const renderReportItem = ({ item }) => (
     <View style={styles.cardReport}>
       <Image source={{ uri: item.photoUrl }} style={styles.cardImage} />
@@ -404,6 +437,27 @@ export default function Dashboard({ user, userData, onLogout }) {
         <View style={styles.cardHeader}><Text style={styles.cardLocation}>{item.locationName}</Text><Text style={styles.cardTime}>{formatTime(item.timestamp)}</Text></View>
         {isLeader && <Text style={styles.reporterName}>👤 {item.userName}</Text>}
         <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text>
+      </View>
+    </View>
+  );
+
+  // RENDER ITEM KHUSUS PANTAUAN (ORANG IZIN)
+  const renderPermitItem = ({ item }) => (
+    <View style={[styles.cardReport, {backgroundColor: '#fef2f2', borderLeftWidth:4, borderLeftColor:'#ef4444'}]}>
+      <View style={styles.cardContent}>
+        <View style={styles.cardHeader}>
+            <Text style={[styles.cardLocation, {color:'#dc2626'}]}>
+                {item.status === 'break' ? '☕ ISTIRAHAT' : item.status === 'permit' ? '🚪 IZIN KELUAR' : item.status === 'pending' ? '⏳ MENUNGGU ACC' : '🔄 MENGGANTIKAN'}
+            </Text>
+            {item.statusEndTime && (
+                <Text style={{fontSize:12, fontWeight:'bold', color:'#dc2626'}}>
+                   S.d. {new Date(item.statusEndTime.toDate()).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                </Text>
+            )}
+        </View>
+        <Text style={styles.reporterName}>👤 {item.nama}</Text>
+        <Text style={{fontSize:12, color:'#64748b', fontStyle:'italic', marginTop:2}}>"{item.statusReason || item.requestReason}"</Text>
+        <Text style={{fontSize:10, color:'#94a3b8', marginTop:5}}>Divisi: {item.divisi?.toUpperCase()}</Text>
       </View>
     </View>
   );
@@ -433,9 +487,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     );
   };
 
-  const formatTime = (ts) => ts ? ts.toDate().toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : "-";
-
-  // --- LAYAR KEMATIAN (BLOCKING SCREEN) ---
   if (isObsolete) {
     return (
         <View style={{flex:1, backgroundColor:'black', justifyContent:'center', alignItems:'center', padding:30}}>
@@ -444,7 +495,7 @@ export default function Dashboard({ user, userData, onLogout }) {
                 UPDATE DIPERLUKAN
             </Text>
             <Text style={{color:'#94a3b8', fontSize:16, textAlign:'center', marginTop:10, marginBottom:30}}>
-                Versi aplikasi ini ({Constants.expoConfig?.version}) sudah usang. Mohon install versi terbaru dari Kasubag/Commander agar bisa absen.
+                Versi aplikasi ini ({Constants.expoConfig?.version}) sudah usang. Mohon install versi terbaru.
             </Text>
             <TouchableOpacity 
                 onPress={() => BackHandler.exitApp()} 
@@ -516,7 +567,7 @@ export default function Dashboard({ user, userData, onLogout }) {
               <Text style={[styles.btnTitle, { color: hasCheckedIn ? '#334155' : '#94a3b8' }]}>Lapor</Text>
             </TouchableOpacity>
 
-            {/* REVISI: Tombol Izin HANYA muncul jika User Aktif DAN BUKAN Kabag TU */}
+            {/* Tombol Izin (Hidden utk Kabag) */}
             {userStatus === 'active' && !isKabag && (
               <TouchableOpacity style={[styles.mainButton, { opacity: hasCheckedIn ? 1 : 0.5 }]} onPress={() => handleProtectedPress('izin')}>
                 <View style={[styles.iconCircle, { backgroundColor: hasCheckedIn ? '#f3e8ff' : '#f1f5f9' }]}>
@@ -532,12 +583,10 @@ export default function Dashboard({ user, userData, onLogout }) {
                   <View style={[styles.iconCircle, { backgroundColor: '#ffedd5' }]}><Ionicons name="download" size={28} color="#ea580c" /></View>
                   <Text style={[styles.btnTitle, {color:'#ea580c'}]}>Rekap</Text>
                 </TouchableOpacity>
-                
                 <TouchableOpacity style={styles.mainButton} onPress={handleResetPoints}>
                   <View style={[styles.iconCircle, { backgroundColor: '#fee2e2' }]}><Ionicons name="trash-bin" size={28} color="#dc2626" /></View>
                   <Text style={[styles.btnTitle, {color:'#dc2626'}]}>Reset</Text>
                 </TouchableOpacity>
-
                 <TouchableOpacity style={styles.mainButton} onPress={handleTriggerSOS} disabled={activeSOS !== null}>
                   <View style={[styles.iconCircle, { backgroundColor: activeSOS ? '#e2e8f0' : '#fee2e2' }]}><Ionicons name="alert-circle" size={28} color={activeSOS ? "#94a3b8" : "#dc2626"} /></View>
                   <Text style={[styles.btnTitle, {color: activeSOS ? "#94a3b8" : "#dc2626"}]}>SOS</Text>
@@ -552,53 +601,67 @@ export default function Dashboard({ user, userData, onLogout }) {
           </View>
         )}
 
-        <Text style={styles.sectionTitle}>{isManagement ? "Semua Laporan" : isLeader ? "Laporan Divisi Anda" : "Riwayat Laporan"}</Text>
+        {/* --- FITUR BARU: KOLOM PENCARIAN --- */}
+        <View style={styles.searchContainer}>
+            <Ionicons name="search" size={20} color="#94a3b8" style={{marginRight:8}} />
+            <TextInput 
+                placeholder="Cari nama, divisi, atau laporan..." 
+                value={searchQuery} 
+                onChangeText={setSearchQuery} 
+                style={{flex:1, color:'#1e293b'}}
+            />
+            {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={()=>setSearchQuery('')}>
+                    <Ionicons name="close-circle" size={20} color="#94a3b8" />
+                </TouchableOpacity>
+            )}
+        </View>
+
+        {/* --- FITUR BARU: TAB MONITORING (Management Only) --- */}
+        {isManagement ? (
+            <View style={styles.tabContainer}>
+                <TouchableOpacity style={[styles.tabBtn, activeTab === 'laporan' && styles.tabBtnActive]} onPress={()=>setActiveTab('laporan')}>
+                    <Text style={[styles.tabText, activeTab === 'laporan' && styles.tabTextActive]}>📋 Laporan</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.tabBtn, activeTab === 'pantauan' && styles.tabBtnActive]} onPress={()=>setActiveTab('pantauan')}>
+                    <Text style={[styles.tabText, activeTab === 'pantauan' && styles.tabTextActive]}>🚧 Pantauan Izin ({getFilteredPermits().length})</Text>
+                </TouchableOpacity>
+            </View>
+        ) : (
+            <Text style={styles.sectionTitle}>{isLeader ? "Laporan Divisi Anda" : "Riwayat Laporan"}</Text>
+        )}
+        
         {loadingReports ? <ActivityIndicator size="large" color={themeColor} /> : (
-          <FlatList data={reportList} renderItem={renderReportItem} keyExtractor={item => item.id} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchData} />} contentContainerStyle={{paddingBottom:100}} ListEmptyComponent={<Text style={{textAlign:'center', marginTop:20, color:'#94a3b8'}}>Belum ada data.</Text>}/>
+            // JIKA TAB LAPORAN ATAU BUKAN MANAGEMENT -> TAMPILKAN LAPORAN
+            (activeTab === 'laporan' || !isManagement) ? (
+                <FlatList 
+                    data={getFilteredReports()} 
+                    renderItem={renderReportItem} 
+                    keyExtractor={item => item.id} 
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchData} />} 
+                    contentContainerStyle={{paddingBottom:100}} 
+                    ListEmptyComponent={<Text style={{textAlign:'center', marginTop:20, color:'#94a3b8'}}>Data tidak ditemukan.</Text>}
+                />
+            ) : (
+                // JIKA TAB PANTAUAN -> TAMPILKAN ORANG IZIN
+                <FlatList 
+                    data={getFilteredPermits()} 
+                    renderItem={renderPermitItem} 
+                    keyExtractor={item => item.id} 
+                    refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchData} />} 
+                    contentContainerStyle={{paddingBottom:100}} 
+                    ListEmptyComponent={<Text style={{textAlign:'center', marginTop:20, color:'#16a34a', fontWeight:'bold'}}>Semua personil Standby (Aman).</Text>}
+                />
+            )
         )}
       </View>
 
       <ChangePasswordModal visible={passModalVisible} onClose={() => setPassModalVisible(false)} user={user} />
-      
-      <Modal visible={editAnnounceVisible} transparent={true} animationType="fade" onRequestClose={() => setEditAnnounceVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-             <Text style={styles.modalTitle}>📢 Update Info Berjalan</Text>
-             <TextInput 
-               style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color: 'black'}}
-               multiline
-               placeholder="Tulis pengumuman di sini..."
-               value={tempAnnounce} 
-               onChangeText={setTempAnnounce}
-             />
-             <View style={styles.modalFooter}>
-               <TouchableOpacity onPress={() => setEditAnnounceVisible(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity>
-               <TouchableOpacity onPress={() => {
-                   handleUpdateAnnouncement();
-               }} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity>
-             </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Modal visible={showDownloadModal} transparent={true} animationType="fade" onRequestClose={() => setShowDownloadModal(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>📅 Download Rekap</Text>
-            <TouchableOpacity style={styles.dateBtn} onPress={() => {setPickerMode('from'); setShowPicker(true);}}><Text>Dari: {dateFrom.toLocaleDateString()}</Text><Ionicons name="calendar" size={20}/></TouchableOpacity>
-            <TouchableOpacity style={[styles.dateBtn, {marginTop:10}]} onPress={() => {setPickerMode('to'); setShowPicker(true);}}><Text>Sampai: {dateTo.toLocaleDateString()}</Text><Ionicons name="calendar" size={20}/></TouchableOpacity>
-            <View style={styles.modalFooter}>
-              <TouchableOpacity onPress={() => setShowDownloadModal(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity>
-              <TouchableOpacity onPress={handleDownloadExcel} style={{backgroundColor:'green', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Download</Text></TouchableOpacity>
-            </View>
-            {showPicker && <DateTimePicker value={pickerMode==='from'?dateFrom:dateTo} mode="date" display="default" onChange={onDateChange}/>}
-          </View>
-        </View>
-      </Modal>
-
-      <ReportModal visible={modalVisible} onClose={() => setModalVisible(false)} user={user} userData={userData} onSuccess={() => { setModalVisible(false); fetchData(); }} />
-      <PermissionModal visible={permModalVisible} onClose={() => setPermModalVisible(false)} user={user} userData={userData} onSuccess={() => { setPermModalVisible(false); fetchData(); }} />
-      <AttendanceModal visible={attModalVisible} onClose={() => setAttModalVisible(false)} user={user} userData={userData} onSuccess={() => { fetchData(); }} />
+      <Modal visible={editAnnounceVisible} transparent={true} animationType="fade" onRequestClose={() => setEditAnnounceVisible(false)}><View style={styles.modalOverlay}><View style={styles.modalContent}><Text style={styles.modalTitle}>📢 Update Info</Text><TextInput style={{borderWidth:1, borderColor:'#ccc', borderRadius:10, padding:10, marginBottom:20, minHeight:60, color:'black'}} multiline value={tempAnnounce} onChangeText={setTempAnnounce}/><View style={styles.modalFooter}><TouchableOpacity onPress={()=>setEditAnnounceVisible(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity><TouchableOpacity onPress={handleUpdateAnnouncement} style={{backgroundColor:'blue', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Update</Text></TouchableOpacity></View></View></View></Modal>
+      <Modal visible={showDownloadModal} transparent={true} animationType="fade" onRequestClose={()=>setShowDownloadModal(false)}><View style={styles.modalOverlay}><View style={styles.modalContent}><Text style={styles.modalTitle}>Download</Text><TouchableOpacity style={styles.dateBtn} onPress={()=>{setPickerMode('from');setShowPicker(true);}}><Text>Dari: {dateFrom.toLocaleDateString()}</Text></TouchableOpacity><TouchableOpacity style={[styles.dateBtn,{marginTop:10}]} onPress={()=>{setPickerMode('to');setShowPicker(true);}}><Text>Sampai: {dateTo.toLocaleDateString()}</Text></TouchableOpacity><View style={styles.modalFooter}><TouchableOpacity onPress={()=>setShowDownloadModal(false)} style={{padding:10}}><Text style={{color:'red'}}>Batal</Text></TouchableOpacity><TouchableOpacity onPress={handleDownloadExcel} style={{backgroundColor:'green', padding:10, borderRadius:8}}><Text style={{color:'white'}}>Download</Text></TouchableOpacity></View>{showPicker && <DateTimePicker value={pickerMode==='from'?dateFrom:dateTo} mode="date" display="default" onChange={onDateChange}/>}</View></View></Modal>
+      <ReportModal visible={modalVisible} onClose={()=>setModalVisible(false)} user={user} userData={userData} onSuccess={()=>{setModalVisible(false);fetchData();}} />
+      <PermissionModal visible={permModalVisible} onClose={()=>setPermModalVisible(false)} user={user} userData={userData} onSuccess={()=>{setPermModalVisible(false);fetchData();}} />
+      <AttendanceModal visible={attModalVisible} onClose={()=>setAttModalVisible(false)} user={user} userData={userData} onSuccess={()=>{fetchData();}} />
     </View>
   );
 }
@@ -607,10 +670,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
   header: { padding: 20, paddingTop: 20, borderBottomLeftRadius: 30, borderBottomRightRadius: 30, paddingBottom: 60, elevation: 5 },
   headerTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, alignItems: 'flex-start' }, 
-  
   headerLogoContainer: { flexDirection: 'row', alignItems: 'center', flex: 1 }, 
   headerLogo: { width: 50, height: 50, resizeMode: 'contain', marginRight: 12 },
-
   welcomeText: { color: '#e2e8f0', fontSize: 12 },
   nameText: { color: 'white', fontSize: 20, fontWeight: 'bold' },
   roleBadge: { backgroundColor: 'rgba(255,255,255,0.2)', alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12, marginTop: 4 },
@@ -619,19 +680,9 @@ const styles = StyleSheet.create({
   scoreCard: { position: 'absolute', bottom: -30, left: 20, right: 20, backgroundColor: 'white', borderRadius: 15, padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', elevation: 4 },
   scoreLabel: { color: '#64748b', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' },
   scoreValue: { color: '#1e293b', fontSize: 28, fontWeight: '900' },
-  
-  marqueeContainer: { 
-    marginTop: 0, 
-    paddingTop: 40, 
-    paddingBottom: 10,
-    backgroundColor: '#fff7ed', 
-    overflow: 'hidden', 
-    borderBottomWidth: 1, 
-    borderBottomColor: '#fed7aa' 
-  },
+  marqueeContainer: { marginTop: 0, paddingTop: 40, paddingBottom: 10, backgroundColor: '#fff7ed', overflow: 'hidden', borderBottomWidth: 1, borderBottomColor: '#fed7aa' },
   marqueeText: { fontSize: 14, color: '#c2410c', fontWeight: 'bold' },
   editBadge: { position: 'absolute', right: 10, top: 40, backgroundColor: '#ea580c', padding: 4, borderRadius: 4, zIndex:10 },
-
   body: { flex: 1, marginTop: 40, paddingHorizontal: 20 },
   menuGrid: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap' },
   mainButton: { backgroundColor: 'white', width: '23%', padding: 8, borderRadius: 12, alignItems: 'center', elevation: 2, marginBottom: 15 },
@@ -659,5 +710,13 @@ const styles = StyleSheet.create({
   sosHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10, justifyContent: 'center', gap: 10 },
   sosTitle: { color: 'white', fontSize: 18, fontWeight: '900' },
   sosText: { color: 'white', fontSize: 14, marginBottom: 2 },
-  sosResolveBtn: { backgroundColor: 'white', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 25, marginTop: 15, width: '100%', alignItems: 'center' }
+  sosResolveBtn: { backgroundColor: 'white', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 25, marginTop: 15, width: '100%', alignItems: 'center' },
+  
+  // STYLE BARU UNTUK PENCARIAN & TAB
+  searchContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'white', borderRadius: 10, paddingHorizontal: 15, paddingVertical: 10, marginBottom: 15, elevation: 2 },
+  tabContainer: { flexDirection: 'row', marginBottom: 15 },
+  tabBtn: { flex: 1, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: '#e2e8f0', alignItems: 'center' },
+  tabBtnActive: { borderBottomColor: '#2563eb' },
+  tabText: { color: '#94a3b8', fontWeight: 'bold' },
+  tabTextActive: { color: '#2563eb', fontWeight: 'bold' },
 });
