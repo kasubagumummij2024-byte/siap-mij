@@ -3,11 +3,13 @@ import { doc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Modal, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { db } from '../firebaseConfig';
+// --- IMPORT NOTIFIKASI ---
+import { getLeaderTokensForDivisi, sendPushNotification } from '../utils/notificationHelper';
 
 export default function PermissionModal({ visible, onClose, user, userData, onSuccess }) {
   const [reason, setReason] = useState('');
   const [loading, setLoading] = useState(false);
-  
+   
   // Default type: Security bisa 'break', yang lain langsung 'permit'
   const isSecurity = userData?.divisi === 'security';
   const [type, setType] = useState(isSecurity ? 'break' : 'permit'); 
@@ -30,13 +32,21 @@ export default function PermissionModal({ visible, onClose, user, userData, onSu
     setLoading(true);
     try {
       const userRef = doc(db, "users", user.uid);
+      const reqReasonFinal = type === 'break' ? 'Istirahat Rutin (40 Menit)' : reason;
       
       await updateDoc(userRef, {
         status: 'pending',          // Status gantung menunggu approval
         requestType: type,          // 'break' atau 'permit'
-        requestReason: type === 'break' ? 'Istirahat Rutin (40 Menit)' : reason,
+        requestReason: reqReasonFinal,
         requestTime: serverTimestamp()
       });
+
+      // --- KIRIM NOTIFIKASI KE PIMPINAN ---
+      const leaderTokens = await getLeaderTokensForDivisi(userData.divisi);
+      const notifTitle = "Pengajuan Izin";
+      const notifBody = `${userData.nama} meminta izin: ${reqReasonFinal}`;
+      await sendPushNotification(leaderTokens, notifTitle, notifBody);
+      // -------------------------------------
       
       Alert.alert("Permintaan Terkirim", "Mohon tunggu persetujuan Pimpinan.");
       onSuccess(); 
@@ -55,7 +65,7 @@ export default function PermissionModal({ visible, onClose, user, userData, onSu
       <View style={styles.overlay}>
         <View style={styles.container}>
           <Text style={styles.title}>Pengajuan Izin</Text>
-          
+           
           {/* HANYA SECURITY YANG LIHAT PILIHAN ISTIRAHAT */}
           {isSecurity ? (
               <View style={styles.tabContainer}>

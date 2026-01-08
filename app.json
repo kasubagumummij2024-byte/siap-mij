@@ -2,7 +2,7 @@
   "expo": {
     "name": "SIAP-MIJ Mobile",
     "slug": "siap_mij_mobile",
-    "version": "1.1.4",
+    "version": "1.1.5",
     "orientation": "portrait",
     "icon": "./assets/logo-mij.png",
     "scheme": "mobile",
@@ -52,6 +52,13 @@
         }
       ]
     ],
+    "updates": {
+      "url": "https://u.expo.dev/95596f83-1094-49b7-be43-9e8d4ab6ceeb",
+      "fallbackToCacheTimeout": 0
+    },
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true

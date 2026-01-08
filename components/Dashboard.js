@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import NetInfo from '@react-native-community/netinfo';
 import { Audio } from 'expo-av';
-import Constants from 'expo-constants'; // TAMBAHAN: Untuk Cek Versi
+import Constants from 'expo-constants';
 import * as Sharing from 'expo-sharing';
 import { addDoc, collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where, writeBatch } from 'firebase/firestore';
 import { useEffect, useRef, useState } from 'react';
@@ -10,6 +10,9 @@ import { ActivityIndicator, Alert, Animated, BackHandler, Dimensions, Easing, Fl
 
 import { db } from '../firebaseConfig';
 import { syncData } from '../utils/syncService';
+// --- IMPORT HELPER NOTIFIKASI ---
+import { getAllOtherTokens, registerForPushNotificationsAsync, sendPushNotification } from '../utils/notificationHelper';
+
 import ApprovalList from './ApprovalList';
 import AttendanceModal from './AttendanceModal';
 import ChangePasswordModal from './ChangePasswordModal';
@@ -29,7 +32,7 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [userStatus, setUserStatus] = useState(userData?.status || 'active'); 
   const [breakLeft, setBreakLeft] = useState(''); 
   const [reportList, setReportList] = useState([]);
-  const [permitList, setPermitList] = useState([]); // STATE BARU: List Orang Izin
+  const [permitList, setPermitList] = useState([]);
   const [loadingReports, setLoadingReports] = useState(true);
 
   // --- STATES ---
@@ -40,16 +43,14 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [editAnnounceVisible, setEditAnnounceVisible] = useState(false); 
   const [tempAnnounce, setTempAnnounce] = useState("");
 
-  // STATE BARU: SEARCH & TAB
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState('laporan'); // 'laporan' atau 'pantauan'
+  const [activeTab, setActiveTab] = useState('laporan');
 
-  // STATE BARU: STATUS KADALUARSA (FORCE UPDATE)
   const [isObsolete, setIsObsolete] = useState(false);
 
   const soundRef = useRef(null);
   const translateX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
-  
+   
   const [modalVisible, setModalVisible] = useState(false);
   const [permModalVisible, setPermModalVisible] = useState(false);
   const [attModalVisible, setAttModalVisible] = useState(false); 
@@ -60,7 +61,6 @@ export default function Dashboard({ user, userData, onLogout }) {
   const [showPicker, setShowPicker] = useState(false);
   const [pickerMode, setPickerMode] = useState('from');
 
-  // Identifikasi Role (Untuk UI)
   const isKasubag = userData?.jabatan?.includes('kasubag'); 
   const isKabag = userData?.jabatan === 'kabag_tu';
   const isCommander = userData?.jabatan === 'commander';
@@ -72,7 +72,12 @@ export default function Dashboard({ user, userData, onLogout }) {
                       userData?.divisi === 'cleaning' ? '#16a34a' : 
                       userData?.divisi === 'management' ? '#7c3aed' : '#ea580c';
 
-  // --- 1. LOGIC FORCE UPDATE (SISTEM PERTAHANAN) ---
+  // --- 1. REGISTRASI NOTIFIKASI ---
+  useEffect(() => {
+    registerForPushNotificationsAsync(user.uid);
+  }, []);
+
+  // --- 2. LOGIC FORCE UPDATE ---
   useEffect(() => {
     const unsubscribe = onSnapshot(doc(db, "app_config", "settings"), (docSnap) => {
         if (docSnap.exists()) {
@@ -99,7 +104,7 @@ export default function Dashboard({ user, userData, onLogout }) {
     return 0;
   };
 
-  // --- 2. LOGIKA SUARA SIRINE ---
+  // --- 3. LOGIKA SUARA SIRINE ---
   useEffect(() => {
     let isCancelled = false; 
     const manageSiren = async () => {
@@ -248,12 +253,10 @@ export default function Dashboard({ user, userData, onLogout }) {
       // --- 2. GET PERMIT LIST (KHUSUS MANAGEMENT) ---
       if (isManagement) {
           const usersRef = collection(db, "users");
-          // Ambil semua user lalu filter di client (karena query '!= active' butuh index khusus)
           const allUsersSnap = await getDocs(usersRef);
           const activePermits = [];
           allUsersSnap.forEach(doc => {
              const d = doc.data();
-             // Jika status bukan active (berarti sedang izin/pending/replacing)
              if (d.status && d.status !== 'active') {
                  activePermits.push({id: doc.id, ...d});
              }
@@ -286,7 +289,7 @@ export default function Dashboard({ user, userData, onLogout }) {
     return () => unsubscribe();
   }, []);
 
-  // --- FILTERED DATA (LOGIC PENCARIAN) ---
+  // --- FILTERED DATA ---
   const getFilteredReports = () => {
       if (!searchQuery) return reportList;
       return reportList.filter(item => 
@@ -342,10 +345,16 @@ export default function Dashboard({ user, userData, onLogout }) {
         { text: "Batal", style: "cancel" },
         { text: "NYALAKAN", style: 'destructive', onPress: async () => {
             try {
+              // 1. Simpan ke Database
               await addDoc(collection(db, "active_sos"), {
                 userId: user.uid, userName: userData?.nama || "Anggota", userDivisi: userData?.divisi || "-",
                 status: "ACTIVE", createdAt: serverTimestamp(),
               });
+
+              // 2. Kirim Notifikasi ke Semua Orang
+              const tokens = await getAllOtherTokens(user.uid);
+              await sendPushNotification(tokens, "SOS BAHAYA!", `${userData?.nama} mengirim sinyal SOS dari divisi ${userData?.divisi}!`);
+
             } catch (e) { Alert.alert("Error", e.message); }
         }}
     ]);
@@ -361,6 +370,9 @@ export default function Dashboard({ user, userData, onLogout }) {
             try {
               const sosRef = doc(db, "active_sos", activeSOS.id);
               await updateDoc(sosRef, { status: "RESOLVED", resolvedBy: user.uid, resolvedAt: serverTimestamp() });
+              // Optional: Kirim notif aman
+              const tokens = await getAllOtherTokens(user.uid);
+              await sendPushNotification(tokens, "SOS SELESAI", "Kondisi dinyatakan aman.");
             } catch (e) { Alert.alert("Error", e.message); }
         }}
       ]);
@@ -429,7 +441,7 @@ export default function Dashboard({ user, userData, onLogout }) {
   };
 
   const formatTime = (ts) => ts ? ts.toDate().toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' }) : "-";
-  
+   
   const renderReportItem = ({ item }) => (
     <View style={styles.cardReport}>
       <Image source={{ uri: item.photoUrl }} style={styles.cardImage} />
@@ -441,7 +453,6 @@ export default function Dashboard({ user, userData, onLogout }) {
     </View>
   );
 
-  // RENDER ITEM KHUSUS PANTAUAN (ORANG IZIN)
   const renderPermitItem = ({ item }) => (
     <View style={[styles.cardReport, {backgroundColor: '#fef2f2', borderLeftWidth:4, borderLeftColor:'#ef4444'}]}>
       <View style={styles.cardContent}>
@@ -567,7 +578,6 @@ export default function Dashboard({ user, userData, onLogout }) {
               <Text style={[styles.btnTitle, { color: hasCheckedIn ? '#334155' : '#94a3b8' }]}>Lapor</Text>
             </TouchableOpacity>
 
-            {/* Tombol Izin (Hidden utk Kabag) */}
             {userStatus === 'active' && !isKabag && (
               <TouchableOpacity style={[styles.mainButton, { opacity: hasCheckedIn ? 1 : 0.5 }]} onPress={() => handleProtectedPress('izin')}>
                 <View style={[styles.iconCircle, { backgroundColor: hasCheckedIn ? '#f3e8ff' : '#f1f5f9' }]}>
@@ -601,7 +611,6 @@ export default function Dashboard({ user, userData, onLogout }) {
           </View>
         )}
 
-        {/* --- FITUR BARU: KOLOM PENCARIAN --- */}
         <View style={styles.searchContainer}>
             <Ionicons name="search" size={20} color="#94a3b8" style={{marginRight:8}} />
             <TextInput 
@@ -617,7 +626,6 @@ export default function Dashboard({ user, userData, onLogout }) {
             )}
         </View>
 
-        {/* --- FITUR BARU: TAB MONITORING (Management Only) --- */}
         {isManagement ? (
             <View style={styles.tabContainer}>
                 <TouchableOpacity style={[styles.tabBtn, activeTab === 'laporan' && styles.tabBtnActive]} onPress={()=>setActiveTab('laporan')}>
@@ -632,7 +640,6 @@ export default function Dashboard({ user, userData, onLogout }) {
         )}
         
         {loadingReports ? <ActivityIndicator size="large" color={themeColor} /> : (
-            // JIKA TAB LAPORAN ATAU BUKAN MANAGEMENT -> TAMPILKAN LAPORAN
             (activeTab === 'laporan' || !isManagement) ? (
                 <FlatList 
                     data={getFilteredReports()} 
@@ -643,7 +650,6 @@ export default function Dashboard({ user, userData, onLogout }) {
                     ListEmptyComponent={<Text style={{textAlign:'center', marginTop:20, color:'#94a3b8'}}>Data tidak ditemukan.</Text>}
                 />
             ) : (
-                // JIKA TAB PANTAUAN -> TAMPILKAN ORANG IZIN
                 <FlatList 
                     data={getFilteredPermits()} 
                     renderItem={renderPermitItem} 
@@ -711,7 +717,7 @@ const styles = StyleSheet.create({
   sosTitle: { color: 'white', fontSize: 18, fontWeight: '900' },
   sosText: { color: 'white', fontSize: 14, marginBottom: 2 },
   sosResolveBtn: { backgroundColor: 'white', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 25, marginTop: 15, width: '100%', alignItems: 'center' },
-  
+   
   // STYLE BARU UNTUK PENCARIAN & TAB
   searchContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'white', borderRadius: 10, paddingHorizontal: 15, paddingVertical: 10, marginBottom: 15, elevation: 2 },
   tabContainer: { flexDirection: 'row', marginBottom: 15 },

@@ -7,7 +7,7 @@ import { db } from '../firebaseConfig';
 export default function AttendanceModal({ visible, onClose, user, userData }) {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('myself'); 
-  
+   
   // State Absen Saya
   const [myStatus, setMyStatus] = useState(null); 
   const [selectedShift, setSelectedShift] = useState('Pagi'); 
@@ -15,11 +15,10 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
   // State Kelola Tim
   const [teamList, setTeamList] = useState([]);
 
-  const isLeader = ['kasubag', 'commander', 'koordinator'].includes(userData?.jabatan);
+  // Cek Jabatan (Revisi agar mencakup kabag_tu dan kasubag_logistik)
+  const isLeader = ['kasubag', 'commander', 'koordinator', 'kabag_tu', 'kasubag_umum', 'kasubag_logistik'].includes(userData?.jabatan) || userData?.jabatan?.includes('kasubag');
   const isSecurity = userData?.divisi === 'security';
 
-  // --- REVISI: GENERATE TANGGAL LOKAL (FIX BUG ABSEN JAM 5 PAGI) ---
-  // Jangan pakai new Date().toISOString() !
   const getLocalTodayDate = () => {
     const now = new Date();
     const year = now.getFullYear();
@@ -28,7 +27,6 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
     return `${year}-${month}-${day}`;
   };
   const todayDate = getLocalTodayDate(); 
-  // ------------------------------------------------------------------
 
   // --- 1. LOAD DATA AWAL ---
   useEffect(() => {
@@ -54,11 +52,27 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
     try {
       setLoading(true);
       let qUsers;
-      if (userData.jabatan === 'kasubag') {
-        qUsers = query(collection(db, "users")); 
+      const jab = userData.jabatan;
+
+      // --- LOGIKA PEMBAGIAN HAK AKSES ABSENSI (REVISI) ---
+      if (jab === 'kabag_tu') {
+          // Kabag TU: Melihat semua user
+          qUsers = query(collection(db, "users"));
+      } else if (jab === 'kasubag_umum') {
+          // Kasubag Umum: Cleaning, Driver, Maintenance, Pantry, Security
+          // Note: Firestore 'in' query max 10 item (aman)
+          qUsers = query(collection(db, "users"), where("divisi", "in", ['cleaning', 'driver', 'maintenance', 'pantry', 'security']));
+      } else if (jab === 'kasubag_logistik') {
+          // Kasubag Logistik: Staf Logistik, Perlengkapan, Perkap
+          qUsers = query(collection(db, "users"), where("divisi", "in", ['staf_logistik', 'staf_perlengkapan', 'staf_perkap']));
+      } else if (jab === 'commander' || jab === 'koordinator') {
+          // Commander/Koordinator: Hanya divisi sendiri
+          qUsers = query(collection(db, "users"), where("divisi", "==", userData.divisi));
       } else {
-        qUsers = query(collection(db, "users"), where("divisi", "==", userData.divisi)); 
+          // Fallback (jika ada jabatan lain yg terselip, lihat divisi sendiri)
+          qUsers = query(collection(db, "users"), where("divisi", "==", userData.divisi));
       }
+
       const usersSnap = await getDocs(qUsers);
       
       const qAtt = query(collection(db, "attendance"), where("date", "==", todayDate));
@@ -71,7 +85,7 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
       const list = [];
       usersSnap.forEach(u => {
         const uData = u.data();
-        if (u.id !== user.uid) {
+        if (u.id !== user.uid) { // Exclude diri sendiri
             list.push({
               id: u.id,
               nama: uData.nama,
@@ -96,7 +110,7 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
         userId: user.uid,
         userName: userData.nama,
         userDivisi: userData.divisi,
-        date: todayDate, // Pastikan ini pakai variabel lokal yg sudah diperbaiki
+        date: todayDate, 
         status: 'Hadir',
         shift: isSecurity ? selectedShift : 'Non-Shift', 
         timestamp: serverTimestamp(),
@@ -120,7 +134,7 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
         userId: memberId,
         userName: memberName,
         userDivisi: memberDivisi,
-        date: todayDate, // Pastikan ini pakai variabel lokal yg sudah diperbaiki
+        date: todayDate, 
         status: newStatus, 
         shift: memberDivisi === 'security' && newStatus === 'Hadir' ? shift : 'Non-Shift',
         timestamp: serverTimestamp(),
@@ -153,7 +167,7 @@ export default function AttendanceModal({ visible, onClose, user, userData }) {
   const renderMyTab = () => (
     <View style={styles.tabContent}>
       <Text style={styles.dateText}>{new Date().toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</Text>
-      
+       
       {myStatus ? (
         <View style={[styles.statusBox, 
           { backgroundColor: myStatus.status === 'Hadir' ? '#dcfce7' : '#fee2e2' }
@@ -287,7 +301,7 @@ const styles = StyleSheet.create({
   tabTxt: { color: '#64748b', fontWeight: 'bold' },
   tabTxtActive: { color: '#2563eb' },
   content: { flex: 1, padding: 20 },
-  
+   
   // Style Tab Saya
   dateText: { textAlign: 'center', color: '#64748b', marginBottom: 20, fontSize: 16 },
   statusBox: { alignItems: 'center', padding: 30, borderRadius: 20 },

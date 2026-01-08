@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert, ActivityIndicator, StatusBar, Image } from 'react-native';
-import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
-import { auth, db } from './firebaseConfig'; // Pastikan file ini sudah diisi config asli
 import { registerRootComponent } from 'expo';
+import * as Updates from 'expo-updates'; // IMPORT PENTING UNTUK UPDATE
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import Dashboard from './components/Dashboard';
+import { auth, db } from './firebaseConfig';
 
 // --- HALAMAN LOGIN ---
 export default function App() {
@@ -15,8 +16,42 @@ export default function App() {
   const [nip, setNip] = useState('');
   const [password, setPassword] = useState('');
 
-  // 1. Cek Status Login Saat Aplikasi Dibuka (Auto Login)
+  // --- 1. LOGIKA CEK UPDATE OTOMATIS (OTA) ---
+  async function onFetchUpdateAsync() {
+    try {
+      const update = await Updates.checkForUpdateAsync();
+
+      if (update.isAvailable) {
+        // Jika ada update, download di background
+        await Updates.fetchUpdateAsync();
+        
+        // Beritahu user
+        Alert.alert(
+          "Update Tersedia",
+          "Versi baru aplikasi telah diunduh. Aplikasi akan dimulai ulang untuk menerapkan perubahan.",
+          [
+            { 
+              text: "OK, Restart", 
+              onPress: async () => {
+                await Updates.reloadAsync(); // Restart aplikasi otomatis
+              } 
+            }
+          ]
+        );
+      }
+    } catch (error) {
+      // Error diam-diam agar tidak mengganggu user jika tidak ada internet
+      console.log(`Error fetching update: ${error}`);
+    }
+  }
+
+  // --- 2. Cek Status Login & Update Saat Aplikasi Dibuka ---
   useEffect(() => {
+    // Cek update hanya jika di mode Production (Bukan Emulator Dev)
+    if (!__DEV__) {
+        onFetchUpdateAsync();
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         // Jika user terdeteksi login, ambil data detailnya dari Firestore
@@ -30,7 +65,7 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // 2. Fungsi Ambil Data Profil dari Firestore
+  // --- 3. Fungsi Ambil Data Profil dari Firestore ---
   const fetchUserProfile = async (currentUser) => {
     try {
       const docRef = doc(db, "users", currentUser.uid); // Cari dokumen sesuai NIP (uid)
@@ -50,7 +85,7 @@ export default function App() {
     }
   };
 
-  // 3. Fungsi Tombol Login
+  // --- 4. Fungsi Tombol Login ---
   const handleLogin = () => {
     if (!nip || !password) {
       Alert.alert("Mohon Maaf", "NIP dan Password wajib diisi.");
@@ -69,7 +104,7 @@ export default function App() {
       });
   };
 
-  // 4. Fungsi Logout
+  // --- 5. Fungsi Logout ---
   const handleLogout = () => {
     Alert.alert("Konfirmasi", "Anda yakin ingin keluar?", [
       { text: "Batal", style: "cancel" },
@@ -128,7 +163,7 @@ export default function App() {
         </TouchableOpacity>
       </View>
       
-      <Text style={styles.footer}>App v1.0 • Dev Mode</Text>
+      <Text style={styles.footer}>App v1.1.5 • Production</Text>
     </View>
   );
 }
@@ -206,45 +241,6 @@ const styles = StyleSheet.create({
     marginTop: 40,
     fontSize: 12,
   },
-  // Style untuk Home Sementara
-  card: {
-    backgroundColor: 'white',
-    padding: 20,
-    borderRadius: 10,
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#22c55e', // Green Success
-    textAlign: 'center',
-    marginBottom: 10,
-  },
-  separator: {
-    height: 1,
-    backgroundColor: '#e2e8f0',
-    marginBottom: 15,
-  },
-  label: {
-    fontSize: 12,
-    color: '#64748b',
-    marginTop: 10,
-  },
-  value: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#1e293b',
-  },
-  logoutButton: {
-    backgroundColor: '#ef4444',
-    padding: 15,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 30,
-  },
-  logoutText: {
-    color: 'white',
-    fontWeight: 'bold',
-  }
 });
 
 registerRootComponent(App);
